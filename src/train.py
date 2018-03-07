@@ -14,45 +14,73 @@ def centroid(xs):
     coord=(lat,lon)
     return coord
 
+# set unbuffered output
+import os
+import sys
+sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 0)
+
 ########################################
 print('processing cmd line args')
 import argparse
-import sys
 
 parser=argparse.ArgumentParser('train a model')
 
 # administration variables
-parser.add_argument('--maxsteps',type=int,required=False)
 parser.add_argument('--logdir',type=str,default='log')
-parser.add_argument('--pickle',type=str)
-parser.add_argument('filenames', metavar='N', type=str, nargs='+',
-                    help='gzipped files containing tweets in json format')
+parser.add_argument('--warmstart',type=bool,default=True)
+parser.add_argument('--stepdelta',type=int,default=100)
+
+# debug variables
+parser.add_argument('--no_checkpoint',action='store_true')
+parser.add_argument('--tf_debug',action='store_true')
+parser.add_argument('--repeat_batch',action='store_true')
 
 # model hyperparameters
-parser.add_argument('--hashsize',type=int,default=18)
+parser.add_argument('--data',type=str,required=True)
+parser.add_argument('--data_summary',type=str,default=None)
+parser.add_argument('--hashsize',type=int,default=20)
 parser.add_argument('--batchsize',type=int,default=100)
 parser.add_argument('--learningrate',type=float,default=0.005)
-parser.add_argument('--loss',choices=['l2','angular','xentropy'],required=True)
-parser.add_argument('--output',choices=['naive','aglm','aglm2','proj3d','loc'],required=True)
 parser.add_argument('--l1',type=float,default=0.0)
-parser.add_argument('--maxloc',type=int)
-parser.add_argument('--hidden1',type=int)
-parser.add_argument('--lstm',type=int)
-parser.add_argument('--cnn',type=int)
+
+parser.add_argument('--loss',choices=['l2','chord','dist','dist2','angular','xentropy'],required=True)
+parser.add_argument('--output',choices=['naive','aglm','aglm2','proj3d','loc'],required=True)
+parser.add_argument('--input',choices=['cltcc','bow','bow_dense'])
+parser.add_argument('--full',type=int,nargs='*',default=[])
+
+parser.add_argument('--maxloc',default=10,type=int)
+parser.add_argument('--filter_locations',action='store_true')
+parser.add_argument('--calc_loc',action='store_true')
+parser.add_argument('--calc_gps',action='store_true')
+parser.add_argument('--calc_hash',action='store_true')
+parser.add_argument('--calc_text',action='store_true')
 
 args = parser.parse_args()
 
-if args.output=='loc' and args.pickle==None:
-    print('must specify a pickle file for "loc" outputs')
-    sys.exit(1)
+# ensure valid argument combinations
 
-if args.pickle != None:
+if (args.output in ['naive','aglm','aglm2','proj3d'] or
+    args.loss in ['l2','chord','dist','dist2','angular']
+    ):
+    args.calc_gps=True
+
+if args.output in ['loc'] or args.filter_locations:
+    args.filter_locations=True
+    args.calc_loc=True
+    if not args.data_summary:
+        raise ValueError('--data_summary must be specified when calculating locations')
+
+print('args=',args)
+
+########################################
+if args.data_summary:
+    print('loading data summary pickle')
     import pickle
     from pprint import pprint
     from collections import defaultdict
     lambda0 = lambda: 0
     lambda1 = lambda: 1
-    f=open(args.pickle,'r')
+    f=open(args.data_summary,'r')
     num_pt=pickle.load(f)
     num_ct=pickle.load(f)
     num_fn=pickle.load(f)
@@ -78,14 +106,16 @@ if args.pickle != None:
 ########################################
 print('importing libraries')
 
+import copy
 import datetime
 import gzip
 import math
 import os
 import simplejson as json
 import time
+import unicodedata
 
-import geopy.distance
+#import geopy.distance
 import numpy as np
 import scipy as sp
 
@@ -95,6 +125,7 @@ hv=sklearn.feature_extraction.text.HashingVectorizer(n_features=2**args.hashsize
 ########################################
 print('initializing tensorflow')
 import tensorflow as tf
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 # tf inputs
 with tf.name_scope('inputs'):
@@ -108,142 +139,119 @@ with tf.name_scope('inputs'):
     op_lon_rad_ = op_lon_/360*2*math.pi
 
     # hash bow inputs
-    hash_ = tf.sparse_placeholder(tf.float32)
-    hash_reg = args.l1*tf.sparse_reduce_sum(tf.abs(hash_))
+    hash_ = tf.sparse_placeholder(tf.float32,name='hash_')
+    hash_reg = 0
+    if args.input=='bow':
+        hash_reg = args.l1*tf.sparse_reduce_sum(tf.abs(hash_))
+        input_ = hash_
+        input_size=2**args.hashsize
+        matmul=tf.sparse_tensor_dense_matmul
 
-        #W = tf.Variable(tf.truncated_normal(filter_shape, stddev=0.05), name="W")
-        #b = tf.Variable(tf.constant(0.1, shape=[num_filters_per_size]), name="b")
-        #conv = tf.nn.conv2d(self.input_x, W, strides=[1, 1, 1, 1], padding="VALID", name="conv1")
-        #h = tf.nn.relu(tf.nn.bias_add(conv, b), name="relu")
-        #pooled = tf.nn.max_pool(
-            #h,
-            #ksize=[1, 1, 3, 1],
-            #strides=[1, 1, 3, 1],
-            #padding='VALID',
-            #name="pool1")
-
-    # lstm inputs
-    if args.lstm:
-        cell = tf.nn.rnn_cell.BasicRNNCell(200)
-        init_state = cell.zero_state(args.batchsize, tf.float32)
-        rnn_outputs, final_state = tf.nn.rnn(cell, rnn_inputs, initial_state=init_state)
-
-    # time inputs
-    def wrapped(var,length):
-        with tf.name_scope('wrapped'):
-            scaled=var/length*2*math.pi
-            return tf.sin(scaled)
-    time_dow_ = tf.placeholder(tf.float32, [args.batchsize,1])
-    time_tod_ = tf.placeholder(tf.float32, [args.batchsize,1])
-
-    time_dow_wrapped_ = wrapped(time_dow_,7)
-    time_tod_wrapped_ = wrapped(time_tod_,24)
-
-    # overall input
-    input_ = hash_
-    input_size=2**args.hashsize
-
-# FIXME: cnn inputs
-if args.cnn:
-    tweetlen=280
-    vocabsize=32
-    numfilters=32
-    filterlen=7
-    text_ = tf.placeholder(tf.float32, [args.batchsize,tweetlen,vocabsize])
-    text_reshaped = tf.reshape(text_,[args.batchsize,tweetlen,vocabsize,1])
-
-    with tf.name_scope('conv1'):
-        w = tf.Variable(tf.truncated_normal([filterlen,vocabsize,1,numfilters],stddev=0.05))
-        b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
-        conv = tf.nn.conv2d(text_reshaped, w, strides=[1,1,1,1], padding='VALID')
-        h = tf.nn.tanh(tf.nn.bias_add(conv,b))
-        pooled = tf.nn.max_pool(
-            h,
-            ksize=[1, 3, 1, 1],
-            strides=[1, 3, 1, 1],
-            padding='VALID')
-
-    with tf.name_scope('conv2'):
-        w = tf.Variable(tf.truncated_normal([filterlen,1,numfilters,numfilters],stddev=0.05))
-        b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
-        conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
-        h = tf.nn.tanh(tf.nn.bias_add(conv,b))
-        pooled = tf.nn.max_pool(
-            h,
-            ksize=[1, 3, 1, 1],
-            strides=[1, 3, 1, 1],
-            padding='VALID')
-
-    filterlen=3
-    with tf.name_scope('conv3'):
-        w = tf.Variable(tf.truncated_normal([filterlen,1,numfilters,numfilters],stddev=0.05))
-        b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
-        conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
-        h = tf.nn.tanh(tf.nn.bias_add(conv,b))
-        pooled = h
-
-    with tf.name_scope('conv4'):
-        w = tf.Variable(tf.truncated_normal([filterlen,1,numfilters,numfilters],stddev=0.05))
-        b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
-        conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
-        h = tf.nn.tanh(tf.nn.bias_add(conv,b))
-        pooled = h
-
-    with tf.name_scope('conv5'):
-        w = tf.Variable(tf.truncated_normal([filterlen,1,numfilters,numfilters],stddev=0.05))
-        b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
-        conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
-        h = tf.nn.tanh(tf.nn.bias_add(conv,b))
-        pooled = h
-
-    with tf.name_scope('conv6'):
-        w = tf.Variable(tf.truncated_normal([filterlen,1,numfilters,numfilters],stddev=0.05))
-        b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
-        conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
-        h = tf.nn.tanh(tf.nn.bias_add(conv,b))
-        pooled = tf.nn.max_pool(
-            h,
-            ksize=[1, 3, 1, 1],
-            strides=[1, 3, 1, 1],
-            padding='VALID')
-
-    #w = tf.Variable(tf.truncated_normal([tweetlen,vocabsize,numfilters],stddev=0.05))
-    #b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
-    #conv = tf.nn.conv1d(text_, w, stride=1, padding='VALID')
-    #h = tf.nn.relu(tf.nn.bias_add(conv,b))
-
-    #print(w.get_shape())
-    #print(conv.get_shape())
-    #print(h.get_shape())
-    #print(pooled.get_shape())
-    #sys.exit(0)
-
-    #last=text_reshaped
-    last=pooled
-
-    matmul=tf.matmul
-    #final_layer_size=int(last.get_shape()[1]*last.get_shape()[3])
-    #final_layer=tf.reshape(last,[args.batchsize,final_layer_size])
-    input_size=int(last.get_shape()[1]*last.get_shape()[2]*last.get_shape()[3])
-    input_=tf.reshape(last,[args.batchsize,input_size])
-
-# tf hidden units
-with tf.name_scope('hidden1'):
-    if args.hidden1:
-        w = tf.Variable(tf.truncated_normal([input_size, args.hidden1],
-                                            stddev=1.0/math.sqrt(float(input_size))))
-        b = tf.Variable(tf.truncated_normal([args.hidden1]))
-        #h = tf.nn.relu(tf.sparse_tensor_dense_matmul(input_,w)+b)
-        h = tf.nn.relu(tf.matmul(input_,w)+b)
-
-        final_layer=h
-        final_layer_size=args.hidden1
+    if args.input=='bow_dense':
+        input_size=2**args.hashsize
+        hash_ = tf.placeholder(tf.float32,[args.batchsize,input_size])
+        hash_reg = args.l1*tf.reduce_sum(tf.abs(hash_))
+        input_ = hash_
         matmul=tf.matmul
 
-    else:
-        final_layer=input_
-        final_layer_size=2**args.hashsize
-        matmul=tf.sparse_tensor_dense_matmul
+    # cnn inputs
+    # follows paper "character level convnets for text classification"
+    # see also: Language-Independent Twitter Classification Using Character-Based Convolutional Networks
+    tweetlen=280
+    vocabsize=128
+    numfilters=256
+    activation=tf.nn.relu
+    text_ = tf.placeholder(tf.float32, [args.batchsize,tweetlen,vocabsize])
+    if args.input=='cltcc':
+        text_reshaped = tf.reshape(text_,[args.batchsize,tweetlen,vocabsize,1])
+
+        filterlen=7
+        with tf.name_scope('conv1'):
+            w = tf.Variable(tf.truncated_normal([filterlen,vocabsize,1,numfilters],stddev=0.05))
+            b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
+            conv = tf.nn.conv2d(text_reshaped, w, strides=[1,1,1,1], padding='VALID')
+            h = activation(tf.nn.bias_add(conv,b))
+            pooled = tf.nn.max_pool(
+                h,
+                ksize=[1, 3, 1, 1],
+                strides=[1, 3, 1, 1],
+                padding='VALID')
+
+        with tf.name_scope('conv2'):
+            w = tf.Variable(tf.truncated_normal([filterlen,1,numfilters,numfilters],stddev=0.05))
+            b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
+            conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
+            h = activation(tf.nn.bias_add(conv,b))
+            pooled = tf.nn.max_pool(
+                h,
+                ksize=[1, 3, 1, 1],
+                strides=[1, 3, 1, 1],
+                padding='VALID')
+
+        filterlen=3
+        with tf.name_scope('conv3'):
+            w = tf.Variable(tf.truncated_normal([filterlen,1,numfilters,numfilters],stddev=0.05))
+            b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
+            conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
+            h = activation(tf.nn.bias_add(conv,b))
+            pooled = h
+
+        with tf.name_scope('conv4'):
+            w = tf.Variable(tf.truncated_normal([filterlen,1,numfilters,numfilters],stddev=0.05))
+            b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
+            conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
+            h = activation(tf.nn.bias_add(conv,b))
+            pooled = h
+
+        with tf.name_scope('conv5'):
+            w = tf.Variable(tf.truncated_normal([filterlen,1,numfilters,numfilters],stddev=0.05))
+            b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
+            conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
+            h = activation(tf.nn.bias_add(conv,b))
+            pooled = h
+
+        with tf.name_scope('conv6'):
+            w = tf.Variable(tf.truncated_normal([filterlen,1,numfilters,numfilters],stddev=0.05))
+            b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
+            conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
+            h = activation(tf.nn.bias_add(conv,b))
+            pooled = tf.nn.max_pool(
+                h,
+                ksize=[1, 3, 1, 1],
+                strides=[1, 3, 1, 1],
+                padding='VALID')
+
+        last=pooled
+        matmul=tf.matmul
+        input_size=int(last.get_shape()[1]*last.get_shape()[2]*last.get_shape()[3])
+        input_=tf.reshape(last,[args.batchsize,input_size])
+
+# time inputs
+#def wrapped(var,length):
+    #with tf.name_scope('wrapped'):
+        #scaled=var/length*2*math.pi
+        #return tf.sin(scaled)
+#time_dow_ = tf.placeholder(tf.float32, [args.batchsize,1])
+#time_tod_ = tf.placeholder(tf.float32, [args.batchsize,1])
+#
+#time_dow_wrapped_ = wrapped(time_dow_,7)
+#time_tod_wrapped_ = wrapped(time_tod_,24)
+
+# fully connected hidden layers
+layerindex=0
+final_layer=input_
+final_layer_size=input_size
+
+for layersize in args.full:
+    with tf.name_scope('full%d'%layerindex):
+        w = tf.Variable(tf.truncated_normal([final_layer_size, layersize],
+                                            stddev=1.0/math.sqrt(float(layersize))))
+        b = tf.Variable(tf.truncated_normal([layersize]))
+        h = tf.nn.relu(matmul(final_layer,w)+b)
+        final_layer=h
+        final_layer_size=layersize
+    layerindex+=1
+    matmul=tf.matmul
 
 # rf outputs
 with tf.name_scope('output'):
@@ -267,8 +275,10 @@ with tf.name_scope('output'):
     # treat gps coords as R^2
     if args.output=='naive':
         w = tf.Variable(tf.zeros([final_layer_size, 2]))
-        b = tf.Variable([34.052235,-118.243683])
-        #b = tf.Variable(tf.zeros([2]))
+        if args.warmstart:
+            b = tf.Variable([34.052235,-118.243683])
+        else:
+            b = tf.Variable(tf.zeros([2]))
         gps = matmul(final_layer,w) + b
         op_lat = gps[:,0]
         op_lon = gps[:,1]
@@ -277,13 +287,28 @@ with tf.name_scope('output'):
     # See: "Regression Models for Angular Response" by Fisher and Lee
     if args.output=='aglm':
         w = tf.Variable(tf.zeros([final_layer_size, 2]))
-        #b = tf.Variable([0.6745,-2])
-        b = tf.Variable(tf.zeros([2]))
+        if args.warmstart:
+            b = tf.Variable([0.6745,-2])
+        else:
+            b = tf.Variable(tf.zeros([2]))
         response = matmul(final_layer,w) + b
         op_lat = tf.atan(response[:,0])*360/2/math.pi
         op_lon = tf.atan(response[:,1])*360/math.pi
         gps = tf.stack([op_lat,op_lon],1)
-        #op_lat = tf.Print(op_lat,[response,gps])
+
+    # same as algm, but uses the bias outside of the atan embedding
+    if args.output=='aglm2':
+        w = tf.Variable(tf.zeros([final_layer_size, 2]))
+        if args.warmstart:
+            b0 = tf.Variable([34.052235])
+            b1 = tf.Variable([-118.243683])
+        else:
+            b0 = tf.Variable(tf.zeros([1]))
+            b1 = tf.Variable(tf.zeros([1]))
+        response = matmul(final_layer,w)
+        op_lat = tf.atan(response[:,0])*360/math.pi/2 + b0
+        op_lon = tf.atan(response[:,1])*360/math.pi   + b1
+        gps = tf.stack([op_lat,op_lon],1)
 
     # model gps coordinates in R^3
     if args.output=='proj3d':
@@ -297,8 +322,7 @@ with tf.name_scope('output'):
         op_lon = tf.asin(r3normed[:,2])
         op_lat = tf.asin(r3normed[:,1])*tf.acos(r3normed[:,2])
         gps = tf.stack([op_lat,op_lon],1)
-
-        op_lon=tf.Print(op_lon,[gps,b,norm])
+        #op_lon=tf.Print(op_lon,[gps,b,norm])
 
     # fancy gps coords
     #if args.output=='atlas':
@@ -317,13 +341,15 @@ with tf.name_scope('output'):
         #p3 = tf.Variable([1.0,0,0])
         #q3 = p*(xnorm_squared-1)/(xnorm_squared+1)+x3*2/(xnorm_squared+1)
 
-        op_lat = tf.asin(q3[2])         *360/(2*math.pi)
-        op_lon = tf.atan(q3[1]/q3[0])   *360/(2*math.pi)
-        gps = tf.stack([op_lat,op_lon],1)
-
-        pass
+        #op_lat = tf.asin(q3[2])         *360/(2*math.pi)
+        #op_lon = tf.atan(q3[1]/q3[0])   *360/(2*math.pi)
+        #gps = tf.stack([op_lat,op_lon],1)
+#
+        #pass
 
     # common outputs
+    epsilon = 1e-6
+
     op_lat_rad = op_lat/360*2*math.pi
     op_lon_rad = op_lon/360*2*math.pi
 
@@ -331,123 +357,172 @@ with tf.name_scope('output'):
     squared_angular_dist = ( hav(op_lat_rad-op_lat_rad_)
                     +tf.cos(op_lat_rad)*tf.cos(op_lat_rad_)*hav(op_lon_rad-op_lon_rad_)
                    )
-    miles_dist = 2*3959*tf.asin(tf.sqrt(squared_angular_dist))
-    miles_dist_ave = tf.reduce_sum(miles_dist)/args.batchsize
 
-    #test=tf.Print(miles_dist_ave,[miles_dist_ave])
-    #tf.summary.scalar('miles_dist_ave',test)
+    # radius of earth = 3959 miles, 6371 kilometers
+    op_dist = 2*6371*tf.asin(tf.sqrt(epsilon + squared_angular_dist))
+    op_dist_ave = tf.reduce_sum(op_dist)/args.batchsize
+
+    op_delta_x = tf.cos(op_lat_rad)*tf.cos(op_lon_rad)-tf.cos(op_lat_rad_)*tf.cos(op_lon_rad_)
+    op_delta_y = tf.cos(op_lat_rad)*tf.sin(op_lon_rad)-tf.cos(op_lat_rad_)*tf.sin(op_lon_rad_)
+    op_delta_z = tf.sin(op_lat_rad) - tf.sin(op_lat_rad_)
+    op_chord = tf.sqrt(epsilon + op_delta_x**2 + op_delta_y**2 + op_delta_z**2)
+    #op_dist = 2*6371*tf.asin(op_chord/2)
+    #op_dist_ave = tf.reduce_sum(op_dist)/args.batchsize
+
+    threshold_dist=100
+    op_err = tf.sign(op_dist-threshold_dist)/2+0.5
+    op_err_ave = tf.reduce_sum(op_err)/args.batchsize
 
 # set loss function
 if args.loss=='l2':
-    loss = tf.reduce_sum((gps - gps_) * (gps - gps_))
+    op_loss = tf.reduce_sum((gps - gps_) * (gps - gps_))
+if args.loss=='chord':
+    op_loss = tf.reduce_sum(op_chord)/args.batchsize
+if args.loss=='dist':
+    op_loss = op_dist_ave
+if args.loss=='dist2':
+    op_loss = tf.reduce_sum(op_dist*op_dist)/args.batchsize
 if args.loss=='angular':
-    loss = tf.reduce_sum(squared_angular_dist)
+    op_loss = tf.reduce_sum(squared_angular_dist)
 if args.loss=='xentropy':
-    loss = tf.reduce_sum(tf.nn.sparse_softmax_cross_entropy_with_logits(
+    op_loss = tf.reduce_sum(tf.nn.sparse_softmax_cross_entropy_with_logits(
             labels=tf.to_int64(tf.reshape(loc_,[args.batchsize])),
             logits=loc,
             name='xentropy'
             ))
 
-loss_regularized=loss+hash_reg
+op_loss_regularized=op_loss+hash_reg
 
-loss_sum=tf.summary.scalar('loss', loss)
+op_loss_sum=tf.summary.scalar('loss', op_loss)
 
 # optimization nodes
 global_step = tf.Variable(0, name='global_step', trainable=False)
 optimizer = tf.train.AdamOptimizer(args.learningrate)
-train_op = optimizer.minimize(loss, global_step=global_step)
+train_op = optimizer.minimize(op_loss_regularized, global_step=global_step)
 
-# prepare logging
-localdir='output=%s,maxloc=%s,loss=%s,hidden1=%s,hashsize=%d,learningrate=%f,batchsize=%d'%(
+########################################
+print('preparing logging')
+localdir='data=%s,input=%s,output=%s,loss=%s,full=%s,learningrate=%f,l1=%f,hashsize=%d,maxloc=%s,batchsize=%d'%(
+    os.path.basename(args.data),
+    args.input,
     args.output,
-    str(args.maxloc),
     args.loss,
-    str(args.hidden1),
-    args.hashsize,
+    str(args.full),
     args.learningrate,
+    args.l1,
+    args.hashsize,
+    str(args.maxloc),
     args.batchsize
     )
 logdir=os.path.join(args.logdir,localdir)
-tf.gfile.MakeDirs(logdir)
+if not args.no_checkpoint:
+    tf.gfile.MakeDirs(logdir)
+print('logdir=',logdir)
 
 # create tf session
-sess = tf.Session()
+if args.tf_debug:
+    from tensorflow.python import debug as tf_debug
+    sess = tf_debug.LocalCLIDebugWrapperSession(sess)
+    sess.add_tensor_filter("has_inf_or_nan", tf_debug.has_inf_or_nan)
+else:
+    sess = tf.Session()
+
 summary = tf.summary.merge_all()
-saver = tf.train.Saver(max_to_keep=1)
-summary_writer = tf.summary.FileWriter(logdir, sess.graph)
+saver = tf.train.Saver(max_to_keep=100000)
+if not args.no_checkpoint:
+    summary_writer = tf.summary.FileWriter(logdir, sess.graph)
 sess.run(tf.global_variables_initializer())
+sess.graph.finalize()
 
 ########################################
 print('training')
 
-numlines=0
-step=-1
-epochs=0
-loss_value_total=0
-miles_total=0
-start_time=time.time()
-filename=args.filenames[0]
+stats_epoch={'count':0}
+def reset_stats_epoch():
+    stats_epoch['steps']=0
+    stats_epoch['new']=False
+    stats_epoch['loss']=0
+    stats_epoch['dist']=0
+    stats_epoch['err']=0
+    stats_epoch['start_time']=time.time()
+    stats_epoch['decoding_time']=0
+reset_stats_epoch()
+stats_epoch_prev=stats_epoch
+
+stats_step={'count':-1,'numlines':0}
+def reset_stats_step():
+    stats_step['loss']=0
+    stats_step['dist']=0
+    stats_step['err']=0
+    stats_step['validtweets']=0
+    stats_step['start_time']=time.time()
+    stats_step['decoding_time']=0
+    if not args.repeat_batch:
+        stats_step['numlines']=0
+reset_stats_step()
+
+batch_dict={}
+
+filename=os.path.join(args.data,'train.gz')
 f=gzip.open(filename,'rt')
 
 while True:
-    step+=1
+    stats_step['count']+=1
+    stats_epoch['steps']+=1
 
-    #if step==0:
-    if True:
+    if not args.repeat_batch or stats_step['count']==0:
+        decoding_time_start=time.time()
         batch_dict={
             hash_ : [],
             text_ : [],
             loc_ : [],
             gps_ : [],
         }
-        tweets_total=0
         while len(batch_dict[hash_]) < args.batchsize:
 
             # load and decode next json entry
             nextline=f.readline()
             if nextline=='':
-                epochs+=1
+                stats_epoch['new']=True
+                stats_epoch['count']+=1
                 f.close()
                 f=gzip.open(filename,'rt')
+                print('finished file')
                 continue
             data=json.loads(nextline)
-            numlines+=1
-            tweets_total+=1
+            stats_step['numlines']+=1
 
             # only process entries that contain a tweet
             if data['text']:
 
+                # simplify the unicode representation
+                data['text']=unicodedata.normalize('NFKC',unicode(data['text'].lower()))
+
                 # possibly skip locations
                 full_name=data['place']['full_name']
-                #if args.output=='loc' and not (full_name in lochash):
-                if not (full_name in lochash):
+                if args.filter_locations and not (full_name in lochash):
                     continue
+                stats_step['validtweets']+=1
 
                 # hash features
                 batch_dict[hash_].append(hv.transform([data['text']]))
 
                 # text features
-                bytes=data['text'].encode('utf-8')
                 encodedtext=np.zeros([1,tweetlen,vocabsize])
-                #for i in range(min(tweetlen,len(bytes))):
-                    #encodedtext[0][i][ord(bytes[i])%vocabsize]=1
-                #if len(bytes)>tweetlen:
-                    #print('len(bytes)=',len(bytes),'; text=')
-                    #print(bytes)
                 def myhash(i):
-                    if i>=ord('a') or i<=ord('z'):
-                        val=i-ord('a')
-                    else:
-                        val=5381*i
-                    return val%vocabsize
+                    return (5381*i)%vocabsize
+                    #if i>=ord('a') or i<=ord('z'):
+                        #val=i-ord('a')
+                    #else:
+                        #val=5381*i
+                    #return val%vocabsize
 
-                for i in range(len(data['text'])):
+                for i in range(min(tweetlen,len(data['text']))):
                     encodedtext[0][i][myhash(ord(data['text'][i]))%vocabsize]=1
                 batch_dict[text_].append(encodedtext)
 
                 # get true output
-                if True: #args.output=='gps':
+                if args.calc_gps:
                     if data['geo']:
                         lat=data['geo']['coordinates'][0]
                         lon=data['geo']['coordinates'][1]
@@ -459,57 +534,89 @@ while True:
                         coord=(coord[1],coord[0])
                     batch_dict[gps_].append(np.array(coord))
 
-                if True: #args.output=='loc':
+                if args.calc_loc:
                     full_name=data['place']['full_name']
                     locid=lochash[full_name]
                     batch_dict[loc_].append(np.array([locid]))
 
+    decoding_time_stop=time.time()
+    stats_step['decoding_time']+=decoding_time_stop-decoding_time_start
+    stats_epoch['decoding_time']+=decoding_time_stop-decoding_time_start
+
     # create data dictionary
     def mkSparseTensorValue(m):
         m2=sp.sparse.coo_matrix(m)
-        return tf.SparseTensorValue(zip(m2.row,m2.col),m2.data,m2.shape)
+        if args.input=='bow_dense':
+            return m2.toarray()
+        else:
+            return tf.SparseTensorValue(
+                zip(m2.row,m2.col),
+                m2.data,
+                m2.shape,
+                )
 
     feed_dict = {
         hash_ : mkSparseTensorValue(sp.sparse.vstack(batch_dict[hash_])),
         text_ : np.vstack(batch_dict[text_]),
-        gps_ : np.vstack(batch_dict[gps_]),
-        loc_ : np.vstack(batch_dict[loc_]),
+        #gps_ : np.vstack(batch_dict[gps_]),
+        #loc_ : np.vstack(batch_dict[loc_]),
     }
 
-    # run the model
-    _, loss_value_total, lats, lons, lats_, lons_, miles = sess.run([train_op, loss, op_lat, op_lon, op_lat_,op_lon_,miles_dist_ave],feed_dict=feed_dict)
-    loss_value_ave=loss_value_total/args.batchsize
-    coords=zip(lats,lons)
-    coords_=zip(lats_,lons_)
-    dists=map(lambda (a,b): geopy.distance.great_circle(a,b).miles,zip(coords,coords_))
-    dists_ave=np.mean(dists)
+    if args.calc_gps:
+        feed_dict[gps_] = np.vstack(batch_dict[gps_])
 
-    loss_value_total+=loss_value_ave
-    miles_total+=dists_ave
+    if args.calc_loc:
+        feed_dict[loc_] = np.vstack(batch_dict[loc_])
+
+    # run the model
+    _, loss_ave, dist_ave, err_ave = sess.run(
+        [ train_op, op_loss, op_dist_ave, op_err_ave]
+        , feed_dict=feed_dict
+        )
+
+    stats_step['loss']+=loss_ave
+    stats_step['dist']+=dist_ave
+    stats_step['err']+=err_ave
+
+    stats_epoch['loss']+=loss_ave
+    stats_epoch['dist']+=dist_ave
+    stats_epoch['err']+=err_ave
 
     # Write the summaries and print an overview fairly often.
-    stepdelta=100
-    if step % stepdelta == 0:
-        duration = time.time() - start_time
-        output='  %8d/%2d: loss=%1.2E  dist=%1.2E  good=%1.2f' % (
-              step
-            , epochs
-            , loss_value_total/stepdelta
-            , miles_total/stepdelta
-            , args.batchsize/float(tweets_total)
+    if stats_step['count'] % args.stepdelta == 0:
+        output='  %8d/%4d: loss=%1.2E  dist=%1.2E  err=%1.4f  good=%1.2f  dec=%1.2f' % (
+              stats_step['count']
+            , stats_epoch['count']
+            , stats_step['loss']/args.stepdelta
+            , stats_step['dist']/args.stepdelta
+            , stats_step['err']/args.stepdelta
+            , stats_step['validtweets']/float(stats_step['numlines'])
+            , stats_step['decoding_time']/float(time.time()-stats_step['start_time'])
             )
-        print(datetime.datetime.now(),filename,output)
-        summary_str = sess.run(summary, feed_dict=feed_dict)
-        summary_writer.add_summary(summary_str, step)
-        #summary_writer.flush()
-        start_time = time.time()
+        print(datetime.datetime.now(),output)
+        reset_stats_step()
 
-        loss_value_total=0
-        miles_total=0
+        # save summaries if not debugging
+        if not args.no_checkpoint:
+            summary_str = sess.run(summary, feed_dict=feed_dict)
+            summary_writer.add_summary(summary_str, stats_step['count'])
+            summary_writer.flush()
 
-    # Save a checkpoint and evaluate the model periodically.
-    if (step + 1) % 1000 == 0:
-        checkpoint_file = os.path.join(logdir, 'model.ckpt')
-        saver.save(sess, checkpoint_file, global_step=step)
+    if stats_epoch['new']:
+        print('--------------------------------------------------------------------------------')
+        print('epoch %d' % stats_epoch['count'])
+        print('  time:  %s ' % str(datetime.timedelta(seconds=time.time() - stats_epoch['start_time'])))
+        print('  steps: %d ' % stats_epoch['steps'])
+        print('  loss:  %E    diff: %E' % (stats_epoch['loss']/float(stats_epoch['steps']),stats_epoch['loss']/float(stats_epoch['steps'])-stats_epoch_prev['loss']/float(stats_epoch_prev['steps'])))
+        print('  dist:  %E    diff: %E' % (stats_epoch['dist']/float(stats_epoch['steps']),stats_epoch['dist']/float(stats_epoch['steps'])-stats_epoch_prev['dist']/float(stats_epoch['steps'])))
+        print('  err:   %E    diff: %E' % (stats_epoch['err' ]/float(stats_epoch['steps']),stats_epoch['err' ]/float(stats_epoch['steps'])-stats_epoch_prev['err' ]/float(stats_epoch['steps'])))
+        print('--------------------------------------------------------------------------------')
+        stats_epoch_prev=copy.deepcopy(stats_epoch)
+        reset_stats_epoch()
+
+        # save model if not debugging
+        if not args.no_checkpoint:
+            checkpoint_file = os.path.join(logdir, 'model.ckpt')
+            saver.save(sess, checkpoint_file, global_step=stats_epoch['count'])
 
 f.close()

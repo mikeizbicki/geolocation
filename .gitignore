@@ -3,4 +3,6 @@
 *.swn
 *.swm
 log
+output
+old
 data
