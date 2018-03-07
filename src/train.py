@@ -29,6 +29,8 @@ parser=argparse.ArgumentParser('train a model')
 parser.add_argument('--logdir',type=str,default='log')
 parser.add_argument('--warmstart',type=bool,default=True)
 parser.add_argument('--stepdelta',type=int,default=100)
+parser.add_argument('--seed',type=int,default=0)
+parser.add_argument('--max_open_files',type=int,default=4)
 
 # debug variables
 parser.add_argument('--no_checkpoint',action='store_true')
@@ -121,6 +123,9 @@ import scipy as sp
 
 import sklearn.feature_extraction.text
 hv=sklearn.feature_extraction.text.HashingVectorizer(n_features=2**args.hashsize,norm=None)
+
+import random
+random.seed(args.seed)
 
 ########################################
 print('initializing tensorflow')
@@ -435,6 +440,33 @@ sess.run(tf.global_variables_initializer())
 sess.graph.finalize()
 
 ########################################
+print('allocate datset files')
+
+files_all=[]
+for path_date in os.listdir(args.data):
+    path_date_full=os.path.join(args.data,path_date)
+    if os.path.isdir(path_date_full):
+        for path_hour in os.listdir(path_date_full):
+            files_all.append(os.path.join(path_date_full,path_hour))
+
+files_all.sort()
+files_all=files_all[:3000]
+
+files_train=[]
+files_test=[]
+files_valid=[]
+
+file_count=2
+file_step=13
+for file in files_all:
+    if file_count%file_step==0:
+        files_test.append(file)
+    elif file_count%file_step==1:
+        files_valid.append(file)
+    else:
+        files_train.append(file)
+
+########################################
 print('training')
 
 stats_epoch={'count':0}
@@ -463,8 +495,8 @@ reset_stats_step()
 
 batch_dict={}
 
-filename=os.path.join(args.data,'train.gz')
-f=gzip.open(filename,'rt')
+files_remaining=copy.deepcopy(files_train)
+open_files=[]
 
 while True:
     stats_step['count']+=1
@@ -481,27 +513,48 @@ while True:
         while len(batch_dict[hash_]) < args.batchsize:
 
             # load and decode next json entry
-            nextline=f.readline()
-            if nextline=='':
+            while len(open_files)<args.max_open_files and len(files_remaining)>0:
+                index=random.randrange(len(files_remaining))
+                filename=files_remaining[index]
+                files_remaining.pop(index)
+                open_files.append(open(filename,'rt'))
+                print('  opening [%s]; files remaining: %d/%d; buffer state: %d/%d'%(
+                    filename,
+                    len(files_remaining),
+                    len(files_train),
+                    len(open_files),
+                    args.max_open_files,
+                    ))
+
+            if len(open_files)==0:
                 stats_epoch['new']=True
                 stats_epoch['count']+=1
-                f.close()
-                f=gzip.open(filename,'rt')
-                print('finished file')
+                files_remaining=copy.deepcopy(files_train)
+                continue
+
+            index=random.randrange(len(open_files))
+            nextline=open_files[index].readline()
+            if nextline=='':
+                open_files[index].close()
+                open_files.pop(index)
                 continue
             data=json.loads(nextline)
             stats_step['numlines']+=1
 
             # only process entries that contain a tweet
-            if data['text']:
+            if 'text' in data:
 
                 # simplify the unicode representation
                 data['text']=unicodedata.normalize('NFKC',unicode(data['text'].lower()))
 
                 # possibly skip locations
-                full_name=data['place']['full_name']
-                if args.filter_locations and not (full_name in lochash):
-                    continue
+                if args.filter_locations:
+                    try:
+                        full_name=data['place']['full_name']
+                        if not (full_name in lochash):
+                            continue
+                    except:
+                        continue
                 stats_step['validtweets']+=1
 
                 # hash features
