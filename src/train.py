@@ -51,7 +51,7 @@ parser.add_argument('--dropout',type=float,default=0.0)
 
 parser.add_argument('--loss',choices=['l2','chord','dist','dist2','angular','xentropy'],required=True)
 parser.add_argument('--output',choices=['naive','aglm','aglm2','proj3d','loc'],required=True)
-parser.add_argument('--input',choices=['cltcc','bow'],nargs='+',required=True)
+parser.add_argument('--input',choices=['cltcc','bow','lang','time','const'],nargs='+',required=True)
 parser.add_argument('--full',type=int,nargs='*',default=[])
 
 parser.add_argument('--bow_layersize',type=int,default=2)
@@ -244,6 +244,22 @@ with tf.name_scope('inputs'):
             input_=tf.reshape(last,[args.batchsize,input_size])
             inputs.append(input_)
 
+    # language inputs
+    if 'lang' in args.input:
+        with tf.name_scope('lang'):
+            langs_emperical=[u'am',u'ar',u'bg',u'bn',u'bo',u'ckb',u'cs',u'cy',u'da',u'de',u'dv',u'el',u'en',u'es',u'et',u'eu',u'fa',u'fi',u'fr',u'gu',u'hi',u'ht',u'hu',u'hy',u'in',u'is',u'it',u'iw',u'ja',u'ka',u'km',u'kn',u'ko',u'lo',u'lt',u'lv',u'ml',u'mr',u'my',u'ne',u'nl',u'no',u'or',u'pa',u'pl',u'ps',u'pt',u'ro',u'ru',u'sd',u'si',u'sl',u'sr',u'sv',u'ta',u'te',u'th',u'tl',u'tr',u'uk',u'und',u'ur',u'vi',u'zh']
+            langs_iso_639_1=['ab','aa','af','ak','sq','am','ar','an','hy','as','av','ae','ay','az','bm','ba','eu','be','bn','bh','bi','nb','bs','br','bg','my','es','ca','km','ch','ce','ny','ny','zh','za','cu','cu','cv','kw','co','cr','hr','cs','da','dv','dv','nl','dz','en','eo','et','ee','fo','fj','fi','nl','fr','ff','gd','gl','lg','ka','de','ki','el','kl','gn','gu','ht','ht','ha','he','hz','hi','ho','hu','is','io','ig','id','ia','ie','iu','ik','ga','it','ja','jv','kl','kn','kr','ks','kk','ki','rw','ky','kv','kg','ko','kj','ku','kj','ky','lo','la','lv','lb','li','li','li','ln','lt','lu','lb','mk','mg','ms','ml','dv','mt','gv','mi','mr','mh','ro','ro','mn','na','nv','nv','nd','nr','ng','ne','nd','se','no','nb','nn','ii','ny','nn','ie','oc','oj','cu','cu','cu','or','om','os','os','pi','pa','ps','fa','pl','pt','pa','ps','qu','ro','rm','rn','ru','sm','sg','sa','sc','gd','sr','sn','ii','sd','si','si','sk','sl','so','st','nr','es','su','sw','ss','sv','tl','ty','tg','ta','tt','te','th','bo','ti','to','ts','tn','tr','tk','tw','ug','uk','ur','ug','uz','ca','ve','vi','vo','wa','cy','fy','wo','xh','yi','yo','za','zu']
+            langs=['unknown']+langs_emperical+langs_iso_639_1
+            def hash_lang(lang):
+                try:
+                    return langs.index(lang)
+                except:
+                    print('unk=',lang)
+                    return 0
+            lang_ = tf.placeholder(tf.int32, [args.batchsize,1])
+            lang_one_hot = tf.one_hot(lang_,len(langs),axis=1)
+            inputs.append(lang_one_hot)
+
 # time inputs
 #def wrapped(var,length):
         #with tf.name_scope('wrapped'):
@@ -254,6 +270,13 @@ with tf.name_scope('inputs'):
 #
 #time_dow_wrapped_ = wrapped(time_dow_,7)
 #time_tod_wrapped_ = wrapped(time_tod_,24)
+
+    # constant input, for debugging purposes
+    if 'const' in args.input:
+        with tf.name_scope('const'):
+            const=tf.reshape(tf.tile(tf.constant([1.0]),[args.batchsize]),[args.batchsize,1])
+            inputs.append(const)
+
 
 # fully connected hidden layers
 with tf.name_scope('full'):
@@ -587,6 +610,10 @@ while True:
                         encodedtext[0][i][myhash(ord(data['text'][i]))%args.cltcc_vocabsize]=1
                     batch_dict[text_].append(encodedtext)
 
+                # language features
+                if 'lang' in args.input:
+                    batch_dict[lang_].append(hash_lang(data['lang']))
+
                 # get true output
                 if args.calc_gps:
                     if data['geo']:
@@ -628,6 +655,9 @@ while True:
 
     if 'cltcc' in args.input:
         feed_dict[text_] = np.vstack(batch_dict[text_])
+
+    if 'lang' in args.input:
+        feed_dict[lang_] = np.vstack(batch_dict[lang_])
 
     if args.calc_gps:
         feed_dict[gps_] = np.vstack(batch_dict[gps_])
