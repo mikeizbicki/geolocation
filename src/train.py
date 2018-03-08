@@ -260,16 +260,21 @@ with tf.name_scope('inputs'):
             lang_one_hot = tf.one_hot(lang_,len(langs),axis=1)
             inputs.append(lang_one_hot)
 
-# time inputs
-#def wrapped(var,length):
-        #with tf.name_scope('wrapped'):
-            #scaled=var/length*2*math.pi
-            #return tf.sin(scaled)
-#time_dow_ = tf.placeholder(tf.float32, [args.batchsize,1])
-#time_tod_ = tf.placeholder(tf.float32, [args.batchsize,1])
-#
-#time_dow_wrapped_ = wrapped(time_dow_,7)
-#time_tod_wrapped_ = wrapped(time_tod_,24)
+    # time inputs
+    if 'time' in args.input:
+        with tf.name_scope('time'):
+
+            timestamp_ms_ = tf.placeholder(tf.float32, [args.batchsize,1])
+
+            def wrapped(var,length):
+                scaled=var/length*2*math.pi
+                return [tf.sin(scaled),tf.cos(scaled)]
+
+            time1 = wrapped(timestamp_ms_,1000*60*60*24*7)
+            time2 = wrapped(timestamp_ms_,1000*60*60*24)
+            time3 = wrapped(timestamp_ms_,1000*60*60*8)
+
+            inputs.append(tf.stack(time1+time2+time3,axis=1))
 
     # constant input, for debugging purposes
     if 'const' in args.input:
@@ -277,12 +282,11 @@ with tf.name_scope('inputs'):
             const=tf.reshape(tf.tile(tf.constant([1.0]),[args.batchsize]),[args.batchsize,1])
             inputs.append(const)
 
-
 # fully connected hidden layers
 with tf.name_scope('full'):
     layerindex=0
     final_layer=tf.concat(map(tf.contrib.layers.flatten,inputs),axis=1)
-    final_layer_size=final_layer.get_shape()[1]
+    final_layer_size=int(final_layer.get_shape()[1])
 
     for layersize in args.full:
         with tf.name_scope('full%d'%layerindex):
@@ -614,6 +618,11 @@ while True:
                 if 'lang' in args.input:
                     batch_dict[lang_].append(hash_lang(data['lang']))
 
+                # time features
+                if 'time' in args.input:
+                    timestamp = np.array(float(data['timestamp_ms']))
+                    batch_dict[timestamp_ms_].append(timestamp)
+
                 # get true output
                 if args.calc_gps:
                     if data['geo']:
@@ -658,6 +667,9 @@ while True:
 
     if 'lang' in args.input:
         feed_dict[lang_] = np.vstack(batch_dict[lang_])
+
+    if 'time' in args.input:
+        feed_dict[timestamp_ms_] = np.vstack(batch_dict[timestamp_ms_])
 
     if args.calc_gps:
         feed_dict[gps_] = np.vstack(batch_dict[gps_])
