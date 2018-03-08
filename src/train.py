@@ -26,11 +26,13 @@ import argparse
 parser=argparse.ArgumentParser('train a model')
 
 # administration variables
-parser.add_argument('--logdir',type=str,default='log')
+parser.add_argument('--log_dir',type=str,default='log')
+parser.add_argument('--log_name',type=str,default=None)
 parser.add_argument('--warmstart',type=bool,default=True)
 parser.add_argument('--stepdelta',type=int,default=100)
+parser.add_argument('--stepsave',type=int,default=10000)
 parser.add_argument('--seed',type=int,default=0)
-parser.add_argument('--max_open_files',type=int,default=4)
+parser.add_argument('--max_open_files',type=int,default=48)
 
 # debug variables
 parser.add_argument('--no_checkpoint',action='store_true')
@@ -44,18 +46,24 @@ parser.add_argument('--hashsize',type=int,default=20)
 parser.add_argument('--batchsize',type=int,default=100)
 parser.add_argument('--learningrate',type=float,default=0.005)
 parser.add_argument('--l1',type=float,default=0.0)
+parser.add_argument('--l2',type=float,default=0.0)
+parser.add_argument('--dropout',type=float,default=0.0)
 
 parser.add_argument('--loss',choices=['l2','chord','dist','dist2','angular','xentropy'],required=True)
 parser.add_argument('--output',choices=['naive','aglm','aglm2','proj3d','loc'],required=True)
-parser.add_argument('--input',choices=['cltcc','bow','bow_dense'])
+parser.add_argument('--input',choices=['cltcc','bow'],nargs='+',required=True)
 parser.add_argument('--full',type=int,nargs='*',default=[])
+
+parser.add_argument('--bow_layersize',type=int,default=2)
+parser.add_argument('--bow_dense',action='store_true')
+parser.add_argument('--cltcc_vocabsize',type=int,default=128)
+parser.add_argument('--cltcc_numfilters',type=int,default=256)
 
 parser.add_argument('--maxloc',default=10,type=int)
 parser.add_argument('--filter_locations',action='store_true')
+
 parser.add_argument('--calc_loc',action='store_true')
 parser.add_argument('--calc_gps',action='store_true')
-parser.add_argument('--calc_hash',action='store_true')
-parser.add_argument('--calc_text',action='store_true')
 
 args = parser.parse_args()
 
@@ -109,6 +117,7 @@ if args.data_summary:
 print('importing libraries')
 
 import copy
+from collections import defaultdict
 import datetime
 import gzip
 import math
@@ -135,6 +144,9 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 # tf inputs
 with tf.name_scope('inputs'):
 
+    regularizers=[]
+    inputs=[]
+
     # true labels
     loc_ = tf.placeholder(tf.int32, [args.batchsize,1])
     gps_ = tf.placeholder(tf.float32, [args.batchsize,2])
@@ -144,98 +156,99 @@ with tf.name_scope('inputs'):
     op_lon_rad_ = op_lon_/360*2*math.pi
 
     # hash bow inputs
-    hash_ = tf.sparse_placeholder(tf.float32,name='hash_')
-    hash_reg = 0
-    if args.input=='bow':
-        hash_reg = args.l1*tf.sparse_reduce_sum(tf.abs(hash_))
-        input_ = hash_
-        input_size=2**args.hashsize
-        matmul=tf.sparse_tensor_dense_matmul
-
-    if args.input=='bow_dense':
-        input_size=2**args.hashsize
-        hash_ = tf.placeholder(tf.float32,[args.batchsize,input_size])
-        hash_reg = args.l1*tf.reduce_sum(tf.abs(hash_))
-        input_ = hash_
-        matmul=tf.matmul
+    if 'bow' in args.input:
+        with tf.name_scope('bow'):
+            input_size=2**args.hashsize
+            if args.bow_dense:
+                hash_ = tf.placeholder(tf.float32,[args.batchsize,input_size])
+                matmul = tf.matmul
+                hash_reg=args.l1*tf.reduce_sum(tf.abs(hash_))
+            else:
+                hash_ = tf.sparse_placeholder(tf.float32,name='hash_')
+                matmul = tf.sparse_tensor_dense_matmul
+                hash_reg=args.l1*tf.sparse_reduce_sum(tf.abs(hash_))
+            regularizers.append(hash_reg)
+            w = tf.Variable(tf.truncated_normal([input_size, args.bow_layersize],
+                                                stddev=1.0/math.sqrt(float(args.bow_layersize))))
+            b = tf.Variable(tf.truncated_normal([args.bow_layersize]))
+            inputs.append(matmul(hash_,w)+b)
 
     # cnn inputs
     # follows paper "character level convnets for text classification"
     # see also: Language-Independent Twitter Classification Using Character-Based Convolutional Networks
     tweetlen=280
-    vocabsize=128
-    numfilters=256
     activation=tf.nn.relu
-    text_ = tf.placeholder(tf.float32, [args.batchsize,tweetlen,vocabsize])
-    if args.input=='cltcc':
-        text_reshaped = tf.reshape(text_,[args.batchsize,tweetlen,vocabsize,1])
+    if 'cltcc' in args.input:
+        with tf.name_scope('cltcc'):
+            text_ = tf.placeholder(tf.float32, [args.batchsize,tweetlen,args.cltcc_vocabsize])
+            text_reshaped = tf.reshape(text_,[args.batchsize,tweetlen,args.cltcc_vocabsize,1])
 
-        filterlen=7
-        with tf.name_scope('conv1'):
-            w = tf.Variable(tf.truncated_normal([filterlen,vocabsize,1,numfilters],stddev=0.05))
-            b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
-            conv = tf.nn.conv2d(text_reshaped, w, strides=[1,1,1,1], padding='VALID')
-            h = activation(tf.nn.bias_add(conv,b))
-            pooled = tf.nn.max_pool(
-                h,
-                ksize=[1, 3, 1, 1],
-                strides=[1, 3, 1, 1],
-                padding='VALID')
+            filterlen=7
+            with tf.name_scope('conv1'):
+                w = tf.Variable(tf.truncated_normal([filterlen,args.cltcc_vocabsize,1,args.cltcc_numfilters],stddev=0.05))
+                b = tf.Variable(tf.constant(0.1,shape=[args.cltcc_numfilters]))
+                conv = tf.nn.conv2d(text_reshaped, w, strides=[1,1,1,1], padding='VALID')
+                h = activation(tf.nn.bias_add(conv,b))
+                pooled = tf.nn.max_pool(
+                    h,
+                    ksize=[1, 3, 1, 1],
+                    strides=[1, 3, 1, 1],
+                    padding='VALID')
 
-        with tf.name_scope('conv2'):
-            w = tf.Variable(tf.truncated_normal([filterlen,1,numfilters,numfilters],stddev=0.05))
-            b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
-            conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
-            h = activation(tf.nn.bias_add(conv,b))
-            pooled = tf.nn.max_pool(
-                h,
-                ksize=[1, 3, 1, 1],
-                strides=[1, 3, 1, 1],
-                padding='VALID')
+            with tf.name_scope('conv2'):
+                w = tf.Variable(tf.truncated_normal([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],stddev=0.05))
+                b = tf.Variable(tf.constant(0.1,shape=[args.cltcc_numfilters]))
+                conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
+                h = activation(tf.nn.bias_add(conv,b))
+                pooled = tf.nn.max_pool(
+                    h,
+                    ksize=[1, 3, 1, 1],
+                    strides=[1, 3, 1, 1],
+                    padding='VALID')
 
-        filterlen=3
-        with tf.name_scope('conv3'):
-            w = tf.Variable(tf.truncated_normal([filterlen,1,numfilters,numfilters],stddev=0.05))
-            b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
-            conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
-            h = activation(tf.nn.bias_add(conv,b))
-            pooled = h
+            filterlen=3
+            with tf.name_scope('conv3'):
+                w = tf.Variable(tf.truncated_normal([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],stddev=0.05))
+                b = tf.Variable(tf.constant(0.1,shape=[args.cltcc_numfilters]))
+                conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
+                h = activation(tf.nn.bias_add(conv,b))
+                pooled = h
 
-        with tf.name_scope('conv4'):
-            w = tf.Variable(tf.truncated_normal([filterlen,1,numfilters,numfilters],stddev=0.05))
-            b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
-            conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
-            h = activation(tf.nn.bias_add(conv,b))
-            pooled = h
+            with tf.name_scope('conv4'):
+                w = tf.Variable(tf.truncated_normal([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],stddev=0.05))
+                b = tf.Variable(tf.constant(0.1,shape=[args.cltcc_numfilters]))
+                conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
+                h = activation(tf.nn.bias_add(conv,b))
+                pooled = h
 
-        with tf.name_scope('conv5'):
-            w = tf.Variable(tf.truncated_normal([filterlen,1,numfilters,numfilters],stddev=0.05))
-            b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
-            conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
-            h = activation(tf.nn.bias_add(conv,b))
-            pooled = h
+            with tf.name_scope('conv5'):
+                w = tf.Variable(tf.truncated_normal([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],stddev=0.05))
+                b = tf.Variable(tf.constant(0.1,shape=[args.cltcc_numfilters]))
+                conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
+                h = activation(tf.nn.bias_add(conv,b))
+                pooled = h
 
-        with tf.name_scope('conv6'):
-            w = tf.Variable(tf.truncated_normal([filterlen,1,numfilters,numfilters],stddev=0.05))
-            b = tf.Variable(tf.constant(0.1,shape=[numfilters]))
-            conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
-            h = activation(tf.nn.bias_add(conv,b))
-            pooled = tf.nn.max_pool(
-                h,
-                ksize=[1, 3, 1, 1],
-                strides=[1, 3, 1, 1],
-                padding='VALID')
+            with tf.name_scope('conv6'):
+                w = tf.Variable(tf.truncated_normal([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],stddev=0.05))
+                b = tf.Variable(tf.constant(0.1,shape=[args.cltcc_numfilters]))
+                conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
+                h = activation(tf.nn.bias_add(conv,b))
+                pooled = tf.nn.max_pool(
+                    h,
+                    ksize=[1, 3, 1, 1],
+                    strides=[1, 3, 1, 1],
+                    padding='VALID')
 
-        last=pooled
-        matmul=tf.matmul
-        input_size=int(last.get_shape()[1]*last.get_shape()[2]*last.get_shape()[3])
-        input_=tf.reshape(last,[args.batchsize,input_size])
+            last=pooled
+            input_size=int(last.get_shape()[1]*last.get_shape()[2]*last.get_shape()[3])
+            input_=tf.reshape(last,[args.batchsize,input_size])
+            inputs.append(input_)
 
 # time inputs
 #def wrapped(var,length):
-    #with tf.name_scope('wrapped'):
-        #scaled=var/length*2*math.pi
-        #return tf.sin(scaled)
+        #with tf.name_scope('wrapped'):
+            #scaled=var/length*2*math.pi
+            #return tf.sin(scaled)
 #time_dow_ = tf.placeholder(tf.float32, [args.batchsize,1])
 #time_tod_ = tf.placeholder(tf.float32, [args.batchsize,1])
 #
@@ -243,20 +256,20 @@ with tf.name_scope('inputs'):
 #time_tod_wrapped_ = wrapped(time_tod_,24)
 
 # fully connected hidden layers
-layerindex=0
-final_layer=input_
-final_layer_size=input_size
+with tf.name_scope('full'):
+    layerindex=0
+    final_layer=tf.concat(map(tf.contrib.layers.flatten,inputs),axis=1)
+    final_layer_size=final_layer.get_shape()[1]
 
-for layersize in args.full:
-    with tf.name_scope('full%d'%layerindex):
-        w = tf.Variable(tf.truncated_normal([final_layer_size, layersize],
-                                            stddev=1.0/math.sqrt(float(layersize))))
-        b = tf.Variable(tf.truncated_normal([layersize]))
-        h = tf.nn.relu(matmul(final_layer,w)+b)
-        final_layer=h
-        final_layer_size=layersize
-    layerindex+=1
-    matmul=tf.matmul
+    for layersize in args.full:
+        with tf.name_scope('full%d'%layerindex):
+            w = tf.Variable(tf.truncated_normal([final_layer_size, layersize],
+                                                stddev=1.0/math.sqrt(float(layersize))))
+            b = tf.Variable(tf.truncated_normal([layersize]))
+            h = tf.nn.relu(tf.matmul(final_layer,w)+b)
+            final_layer=h
+            final_layer_size=layersize
+        layerindex+=1
 
 # rf outputs
 with tf.name_scope('output'):
@@ -265,7 +278,7 @@ with tf.name_scope('output'):
     if args.output=='loc':
         w = tf.Variable(tf.zeros([final_layer_size, len(lochash)]))
         b = tf.Variable(tf.zeros([len(lochash)]))
-        loc = matmul(final_layer,w)+b
+        loc = tf.matmul(final_layer,w)+b
         probs = tf.nn.softmax(loc)
 
         np_lats=np.array(lats_hash,dtype=np.float32)
@@ -284,7 +297,7 @@ with tf.name_scope('output'):
             b = tf.Variable([34.052235,-118.243683])
         else:
             b = tf.Variable(tf.zeros([2]))
-        gps = matmul(final_layer,w) + b
+        gps = tf.matmul(final_layer,w) + b
         op_lat = gps[:,0]
         op_lon = gps[:,1]
 
@@ -296,7 +309,7 @@ with tf.name_scope('output'):
             b = tf.Variable([0.6745,-2])
         else:
             b = tf.Variable(tf.zeros([2]))
-        response = matmul(final_layer,w) + b
+        response = tf.matmul(final_layer,w) + b
         op_lat = tf.atan(response[:,0])*360/2/math.pi
         op_lon = tf.atan(response[:,1])*360/math.pi
         gps = tf.stack([op_lat,op_lon],1)
@@ -310,7 +323,7 @@ with tf.name_scope('output'):
         else:
             b0 = tf.Variable(tf.zeros([1]))
             b1 = tf.Variable(tf.zeros([1]))
-        response = matmul(final_layer,w)
+        response = tf.matmul(final_layer,w)
         op_lat = tf.atan(response[:,0])*360/math.pi/2 + b0
         op_lon = tf.atan(response[:,1])*360/math.pi   + b1
         gps = tf.stack([op_lat,op_lon],1)
@@ -319,7 +332,7 @@ with tf.name_scope('output'):
     if args.output=='proj3d':
         w = tf.Variable(tf.zeros([final_layer_size, 3]))
         b = tf.Variable([0.1,0,0])
-        r3 = matmul(final_layer,w) + b
+        r3 = tf.matmul(final_layer,w) + b
         norm = tf.sqrt(tf.reduce_sum(r3*r3,1))
         r3normed = r3/tf.stack([norm,norm,norm],1)
         #op_lon = tf.asin(tf.minimum(1.0,r3normed[:,2]))
@@ -334,7 +347,7 @@ with tf.name_scope('output'):
         #numatlas=10
         #w = tf.Variable(tf.zeros([final_layer_size,2]))
         #b = tf.Variable([1.0,1.0])
-        #x = matmul(final_layer,w)+b
+        #x = tf.matmul(final_layer,w)+b
         #xnorm_squared = tf.reduce_sum(x*x)
 
         #pad=tf.zeros([args.batchsize,1])
@@ -396,7 +409,7 @@ if args.loss=='xentropy':
             name='xentropy'
             ))
 
-op_loss_regularized=op_loss+hash_reg
+op_loss_regularized=op_loss+sum(regularizers)
 
 op_loss_sum=tf.summary.scalar('loss', op_loss)
 
@@ -407,22 +420,25 @@ train_op = optimizer.minimize(op_loss_regularized, global_step=global_step)
 
 ########################################
 print('preparing logging')
-localdir='data=%s,input=%s,output=%s,loss=%s,full=%s,learningrate=%f,l1=%f,hashsize=%d,maxloc=%s,batchsize=%d'%(
-    os.path.basename(args.data),
-    args.input,
-    args.output,
-    args.loss,
-    str(args.full),
-    args.learningrate,
-    args.l1,
-    args.hashsize,
-    str(args.maxloc),
-    args.batchsize
-    )
-logdir=os.path.join(args.logdir,localdir)
+if args.log_name is None:
+    args.log_name='data=%s,input=%s,output=%s,loss=%s,full=%s,learningrate=%f,l1=%f,l2=%f,dropout=%f,hashsize=%d,maxloc=%s,batchsize=%d'%(
+        os.path.basename(args.data),
+        args.input,
+        args.output,
+        args.loss,
+        str(args.full),
+        args.learningrate,
+        args.l1,
+        args.l2,
+        args.dropout,
+        args.hashsize,
+        str(args.maxloc),
+        args.batchsize
+        )
+log_dir=os.path.join(args.log_dir,args.log_name)
 if not args.no_checkpoint:
-    tf.gfile.MakeDirs(logdir)
-print('logdir=',logdir)
+    tf.gfile.MakeDirs(log_dir)
+print('log_dir=',log_dir)
 
 # create tf session
 if args.tf_debug:
@@ -435,7 +451,7 @@ else:
 summary = tf.summary.merge_all()
 saver = tf.train.Saver(max_to_keep=100000)
 if not args.no_checkpoint:
-    summary_writer = tf.summary.FileWriter(logdir, sess.graph)
+    summary_writer = tf.summary.FileWriter(log_dir, sess.graph)
 sess.run(tf.global_variables_initializer())
 sess.graph.finalize()
 
@@ -493,8 +509,6 @@ def reset_stats_step():
         stats_step['numlines']=0
 reset_stats_step()
 
-batch_dict={}
-
 files_remaining=copy.deepcopy(files_train)
 open_files=[]
 
@@ -504,13 +518,9 @@ while True:
 
     if not args.repeat_batch or stats_step['count']==0:
         decoding_time_start=time.time()
-        batch_dict={
-            hash_ : [],
-            text_ : [],
-            loc_ : [],
-            gps_ : [],
-        }
-        while len(batch_dict[hash_]) < args.batchsize:
+        batch_dict=defaultdict(list)
+        batch_dict_size=0
+        while batch_dict_size < args.batchsize:
 
             # load and decode next json entry
             while len(open_files)<args.max_open_files and len(files_remaining)>0:
@@ -556,23 +566,26 @@ while True:
                     except:
                         continue
                 stats_step['validtweets']+=1
+                batch_dict_size+=1
 
                 # hash features
-                batch_dict[hash_].append(hv.transform([data['text']]))
+                if 'bow' in args.input:
+                    batch_dict[hash_].append(hv.transform([data['text']]))
 
                 # text features
-                encodedtext=np.zeros([1,tweetlen,vocabsize])
-                def myhash(i):
-                    return (5381*i)%vocabsize
-                    #if i>=ord('a') or i<=ord('z'):
-                        #val=i-ord('a')
-                    #else:
-                        #val=5381*i
-                    #return val%vocabsize
+                if 'cltcc' in args.input:
+                    encodedtext=np.zeros([1,tweetlen,args.cltcc_vocabsize])
+                    def myhash(i):
+                        return (5381*i)%args.cltcc_vocabsize
+                        #if i>=ord('a') or i<=ord('z'):
+                            #val=i-ord('a')
+                        #else:
+                            #val=5381*i
+                        #return val%args.cltcc_vocabsize
 
-                for i in range(min(tweetlen,len(data['text']))):
-                    encodedtext[0][i][myhash(ord(data['text'][i]))%vocabsize]=1
-                batch_dict[text_].append(encodedtext)
+                    for i in range(min(tweetlen,len(data['text']))):
+                        encodedtext[0][i][myhash(ord(data['text'][i]))%args.cltcc_vocabsize]=1
+                    batch_dict[text_].append(encodedtext)
 
                 # get true output
                 if args.calc_gps:
@@ -597,23 +610,24 @@ while True:
     stats_epoch['decoding_time']+=decoding_time_stop-decoding_time_start
 
     # create data dictionary
-    def mkSparseTensorValue(m):
-        m2=sp.sparse.coo_matrix(m)
-        if args.input=='bow_dense':
-            return m2.toarray()
-        else:
-            return tf.SparseTensorValue(
-                zip(m2.row,m2.col),
-                m2.data,
-                m2.shape,
-                )
 
-    feed_dict = {
-        hash_ : mkSparseTensorValue(sp.sparse.vstack(batch_dict[hash_])),
-        text_ : np.vstack(batch_dict[text_]),
-        #gps_ : np.vstack(batch_dict[gps_]),
-        #loc_ : np.vstack(batch_dict[loc_]),
-    }
+    feed_dict = {}
+
+    if 'bow' in args.input:
+        def mkSparseTensorValue(m):
+            m2=sp.sparse.coo_matrix(m)
+            if args.bow_dense:
+                return m2.toarray()
+            else:
+                return tf.SparseTensorValue(
+                    zip(m2.row,m2.col),
+                    m2.data,
+                    m2.shape,
+                    )
+        feed_dict[hash_] = mkSparseTensorValue(sp.sparse.vstack(batch_dict[hash_]))
+
+    if 'cltcc' in args.input:
+        feed_dict[text_] = np.vstack(batch_dict[text_])
 
     if args.calc_gps:
         feed_dict[gps_] = np.vstack(batch_dict[gps_])
@@ -655,6 +669,11 @@ while True:
             summary_writer.add_summary(summary_str, stats_step['count'])
             summary_writer.flush()
 
+    # save model if not debugging
+    if stats_step['count'] % args.stepsave == 0 and not args.no_checkpoint:
+        checkpoint_file = os.path.join(log_dir, 'model.ckpt')
+        saver.save(sess, checkpoint_file, global_step=stats_epoch['count'])
+
     if stats_epoch['new']:
         print('--------------------------------------------------------------------------------')
         print('epoch %d' % stats_epoch['count'])
@@ -669,7 +688,7 @@ while True:
 
         # save model if not debugging
         if not args.no_checkpoint:
-            checkpoint_file = os.path.join(logdir, 'model.ckpt')
+            checkpoint_file = os.path.join(log_dir, 'model.ckpt')
             saver.save(sess, checkpoint_file, global_step=stats_epoch['count'])
 
 f.close()
