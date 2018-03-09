@@ -141,6 +141,8 @@ random.seed(args.seed)
 print('initializing tensorflow')
 import tensorflow as tf
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+tf.set_random_seed(args.seed)
+var_init = lambda shape,var: tf.truncated_normal(shape,stddev=var,seed=args.seed)
 
 # tf inputs
 with tf.name_scope('inputs'):
@@ -169,9 +171,8 @@ with tf.name_scope('inputs'):
                 matmul = tf.sparse_tensor_dense_matmul
                 hash_reg=args.l1*tf.sparse_reduce_sum(tf.abs(hash_))
             regularizers.append(hash_reg)
-            w = tf.Variable(tf.truncated_normal([input_size, args.bow_layersize],
-                                                stddev=1.0/math.sqrt(float(args.bow_layersize))))
-            b = tf.Variable(tf.truncated_normal([args.bow_layersize]))
+            w = tf.Variable(var_init([input_size,args.bow_layersize],1.0))
+            b = tf.constant(0.1,shape=[args.bow_layersize])
             inputs.append(matmul(hash_,w)+b)
 
     # cnn inputs
@@ -186,7 +187,7 @@ with tf.name_scope('inputs'):
 
             filterlen=7
             with tf.name_scope('conv1'):
-                w = tf.Variable(tf.truncated_normal([filterlen,args.cltcc_vocabsize,1,args.cltcc_numfilters],stddev=0.05))
+                w = tf.Variable(var_init([filterlen,args.cltcc_vocabsize,1,args.cltcc_numfilters],0.05))
                 b = tf.Variable(tf.constant(0.1,shape=[args.cltcc_numfilters]))
                 conv = tf.nn.conv2d(text_reshaped, w, strides=[1,1,1,1], padding='VALID')
                 h = activation(tf.nn.bias_add(conv,b))
@@ -197,7 +198,7 @@ with tf.name_scope('inputs'):
                     padding='VALID')
 
             with tf.name_scope('conv2'):
-                w = tf.Variable(tf.truncated_normal([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],stddev=0.05))
+                w = tf.Variable(var_init([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],0.05))
                 b = tf.Variable(tf.constant(0.1,shape=[args.cltcc_numfilters]))
                 conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
                 h = activation(tf.nn.bias_add(conv,b))
@@ -209,28 +210,28 @@ with tf.name_scope('inputs'):
 
             filterlen=3
             with tf.name_scope('conv3'):
-                w = tf.Variable(tf.truncated_normal([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],stddev=0.05))
+                w = tf.Variable(var_init([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],0.05))
                 b = tf.Variable(tf.constant(0.1,shape=[args.cltcc_numfilters]))
                 conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
                 h = activation(tf.nn.bias_add(conv,b))
                 pooled = h
 
             with tf.name_scope('conv4'):
-                w = tf.Variable(tf.truncated_normal([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],stddev=0.05))
+                w = tf.Variable(var_init([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],0.05))
                 b = tf.Variable(tf.constant(0.1,shape=[args.cltcc_numfilters]))
                 conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
                 h = activation(tf.nn.bias_add(conv,b))
                 pooled = h
 
             with tf.name_scope('conv5'):
-                w = tf.Variable(tf.truncated_normal([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],stddev=0.05))
+                w = tf.Variable(var_init([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],0.05))
                 b = tf.Variable(tf.constant(0.1,shape=[args.cltcc_numfilters]))
                 conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
                 h = activation(tf.nn.bias_add(conv,b))
                 pooled = h
 
             with tf.name_scope('conv6'):
-                w = tf.Variable(tf.truncated_normal([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],stddev=0.05))
+                w = tf.Variable(var_init([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],0.05))
                 b = tf.Variable(tf.constant(0.1,shape=[args.cltcc_numfilters]))
                 conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
                 h = activation(tf.nn.bias_add(conv,b))
@@ -291,9 +292,8 @@ with tf.name_scope('full'):
 
     for layersize in args.full:
         with tf.name_scope('full%d'%layerindex):
-            w = tf.Variable(tf.truncated_normal([final_layer_size, layersize],
-                                                stddev=1.0/math.sqrt(float(layersize))))
-            b = tf.Variable(tf.truncated_normal([layersize]))
+            w = tf.Variable(var_init([final_layer_size, layersize],1.0/math.sqrt(float(layersize))))
+            b = tf.constant(0.1,shape=[layersize])
             h = tf.nn.relu(tf.matmul(final_layer,w)+b)
             final_layer=tf.nn.dropout(h,args.dropout)
             final_layer_size=layersize
@@ -442,7 +442,6 @@ if args.loss=='xentropy':
 with tf.name_scope('l2_regularization'):
     vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
     for var in vars:
-        print('var=',var)
         regularizers.append(args.l2*tf.nn.l2_loss(var))
 
 op_loss_regularized=op_loss+tf.reduce_sum(regularizers)
@@ -588,7 +587,7 @@ while True:
             except Exception as e:
                 print('current file=',open_files[index].name)
                 print(e)
-                raise e
+                continue
 
             stats_step['numlines']+=1
 
@@ -717,18 +716,24 @@ while True:
             , stats_step['decoding_time']/float(time.time()-stats_step['start_time'])
             )
         print(datetime.datetime.now(),output)
-        reset_stats_step()
+
+        # quit if we've gotten nan values
+        if math.isnan(stats_step['loss']):
+            raise ValueError('NaN loss')
 
         # save summaries if not debugging
         if not args.no_checkpoint:
-            #summary_str = sess.run(summary, feed_dict=feed_dict)
-            #summary_writer.add_summary(summary_str, stats_step['count'])
+            summary_str = sess.run(summary, feed_dict=feed_dict)
+            summary_writer.add_summary(summary_str, stats_step['count'])
             summary_writer.flush()
 
-    # save model if not debugging
-    if stats_step['count'] % args.stepsave == 0 and not args.no_checkpoint:
-        checkpoint_file = os.path.join(log_dir, 'model.ckpt')
-        saver.save(sess, checkpoint_file, global_step=stats_epoch['count'])
+        # save model if not debugging
+        if stats_step['count'] % args.stepsave == 0 and not args.no_checkpoint:
+            checkpoint_file = os.path.join(log_dir, 'model.ckpt')
+            saver.save(sess, checkpoint_file, global_step=stats_step['count'])
+
+        # reset step variables
+        reset_stats_step()
 
     if stats_epoch['new']:
         print('--------------------------------------------------------------------------------')
@@ -740,11 +745,12 @@ while True:
         print('  err:   %E    diff: %E' % (stats_epoch['err' ]/float(stats_epoch['steps']),stats_epoch['err' ]/float(stats_epoch['steps'])-stats_epoch_prev['err' ]/float(stats_epoch['steps'])))
         print('--------------------------------------------------------------------------------')
         stats_epoch_prev=copy.deepcopy(stats_epoch)
-        reset_stats_epoch()
 
         # save model if not debugging
         if not args.no_checkpoint:
             checkpoint_file = os.path.join(log_dir, 'model.ckpt')
-            saver.save(sess, checkpoint_file, global_step=stats_epoch['count'])
+            saver.save(sess, checkpoint_file, global_step=stats_step['count'])
 
-f.close()
+        # reset epoch variables
+        reset_stats_epoch()
+
