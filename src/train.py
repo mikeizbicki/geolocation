@@ -45,14 +45,15 @@ parser.add_argument('--data_summary',type=str,default=None)
 parser.add_argument('--hashsize',type=int,default=20)
 parser.add_argument('--batchsize',type=int,default=100)
 parser.add_argument('--learningrate',type=float,default=0.005)
-parser.add_argument('--l1',type=float,default=0.0)
-parser.add_argument('--l2',type=float,default=0.0)
-parser.add_argument('--dropout',type=float,default=0.0)
 
-parser.add_argument('--loss',choices=['l2','chord','dist','dist2','angular','xentropy'],required=True)
-parser.add_argument('--output',choices=['naive','aglm','aglm2','proj3d','loc'],required=True)
 parser.add_argument('--input',choices=['cltcc','bow','lang','time','const'],nargs='+',required=True)
 parser.add_argument('--full',type=int,nargs='*',default=[])
+parser.add_argument('--output',choices=['naive','aglm','aglm2','proj3d','loc'],required=True)
+parser.add_argument('--loss',choices=['l2','chord','dist','dist2','angular','xentropy'],required=True)
+
+parser.add_argument('--dropout',type=float,default=0.5)
+parser.add_argument('--l1',type=float,default=0.0)
+parser.add_argument('--l2',type=float,default=1e-5)
 
 parser.add_argument('--bow_layersize',type=int,default=2)
 parser.add_argument('--bow_dense',action='store_true')
@@ -294,7 +295,7 @@ with tf.name_scope('full'):
                                                 stddev=1.0/math.sqrt(float(layersize))))
             b = tf.Variable(tf.truncated_normal([layersize]))
             h = tf.nn.relu(tf.matmul(final_layer,w)+b)
-            final_layer=h
+            final_layer=tf.nn.dropout(h,args.dropout)
             final_layer_size=layersize
         layerindex+=1
 
@@ -436,9 +437,15 @@ if args.loss=='xentropy':
             name='xentropy'
             ))
 
-op_loss_regularized=op_loss+sum(regularizers)
+# add regularizers
 
-op_loss_sum=tf.summary.scalar('loss', op_loss)
+with tf.name_scope('l2_regularization'):
+    vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+    for var in vars:
+        print('var=',var)
+        regularizers.append(args.l2*tf.nn.l2_loss(var))
+
+op_loss_regularized=op_loss+tf.reduce_sum(regularizers)
 
 # optimization nodes
 global_step = tf.Variable(0, name='global_step', trainable=False)
@@ -524,7 +531,7 @@ def reset_stats_epoch():
 reset_stats_epoch()
 stats_epoch_prev=stats_epoch
 
-stats_step={'count':-1,'numlines':0}
+stats_step={'count':0,'numlines':0}
 def reset_stats_step():
     stats_step['loss']=0
     stats_step['dist']=0
@@ -575,7 +582,14 @@ while True:
                 open_files[index].close()
                 open_files.pop(index)
                 continue
-            data=json.loads(nextline)
+
+            try:
+                data=json.loads(nextline)
+            except Exception as e:
+                print('current file=',open_files[index].name)
+                print(e)
+                raise e
+
             stats_step['numlines']+=1
 
             # only process entries that contain a tweet
@@ -679,7 +693,7 @@ while True:
 
     # run the model
     _, loss_ave, dist_ave, err_ave = sess.run(
-        [ train_op, op_loss, op_dist_ave, op_err_ave]
+        [ train_op, op_loss_regularized, op_dist_ave, op_err_ave]
         , feed_dict=feed_dict
         )
 
@@ -707,8 +721,8 @@ while True:
 
         # save summaries if not debugging
         if not args.no_checkpoint:
-            summary_str = sess.run(summary, feed_dict=feed_dict)
-            summary_writer.add_summary(summary_str, stats_step['count'])
+            #summary_str = sess.run(summary, feed_dict=feed_dict)
+            #summary_writer.add_summary(summary_str, stats_step['count'])
             summary_writer.flush()
 
     # save model if not debugging
