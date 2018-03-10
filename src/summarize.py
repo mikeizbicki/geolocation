@@ -1,7 +1,8 @@
 #!/usr/bin/python
 
 from __future__ import print_function
-import simplejson as json
+#import simplejson as json
+import json
 from pprint import pprint
 import sys
 import datetime
@@ -22,6 +23,7 @@ def lambda0():
     return 0
 num_pt=defaultdict(lambda0)
 num_ct=defaultdict(lambda0)
+num_lang=defaultdict(lambda0)
 
 def lambda1():
     return defaultdict(lambda0)
@@ -35,7 +37,7 @@ numca=0
 nummx=0
 for filename in files:
     print(datetime.datetime.now(),filename)
-    f=gzip.open(filename,'rt')
+    f=open(filename,'rt')
 
     text='start'
     while text != '' and numlines < maxtweets:
@@ -43,6 +45,8 @@ for filename in files:
         numlines+=1
         try:
             data=json.loads(text)
+            pprint(data)
+            sys.exit(0)
             if 'limit' in data or not data['place']:
                 continue
             numtweets+=1
@@ -59,10 +63,13 @@ for filename in files:
                 num_ct[data['place']['country']]+=1
             if data['geo']:
                 numgeo+=1
+            if 'lang' in data:
+                num_lang[data['lang']]+=1
 
         except:
-            e = sys.exc_info()[0]
-            print('error on line', numlines,': ',e)
+            sys.exit(0)
+            #e = sys.exc_info()[0]
+            #print('error on line', numlines,': ',e)
             #pprint(data)
 
     f.close()
@@ -77,11 +84,14 @@ print('num_ct:')
 pprint((num_ct))
 print('num_fn:')
 pprint((num_fn))
+print('num_lang:')
+pprint((num_lang))
 
 f=open('summary.pkl','w')
 pickle.dump(num_pt,f)
 pickle.dump(num_ct,f)
 pickle.dump(num_fn,f)
 pickle.dump(loc_fn,f)
+pickle.dump(num_lang,f)
 f.close()
 
