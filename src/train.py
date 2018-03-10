@@ -272,10 +272,9 @@ with tf.name_scope('output'):
                 ))
         op_losses['loc_xentropy']=xentropy
 
-        loc=tf.argmax(logits,axis=1)
-        #loc=tf.Print(loc,[loc,loc_])
+        loc=tf.reshape(tf.argmax(logits,axis=1),shape=[args.batchsize,1])
         err = tf.reduce_mean(tf.cast(tf.equal(loc,loc_),tf.float32))
-        op_errors['loc_err']=err
+        op_errors['loc_acc']=err
 
         # FIXME: this is from the old way of inserting locs
         if False:
@@ -341,8 +340,9 @@ with tf.name_scope('output'):
                 ))
             op_losses['country_xentropy']=xentropy
 
-            err = tf.reduce_mean(tf.cast(tf.equal(tf.argmax(logits,axis=1),country_),tf.float32))
-            op_errors['country_err']=err
+            country=tf.reshape(tf.argmax(logits,axis=1),shape=[args.batchsize,1])
+            err = tf.reduce_mean(tf.cast(tf.equal(country,country_),tf.float32))
+            op_errors['country_acc']=err
 
     # position based losses
     if 'pos' in args.output:
@@ -583,7 +583,7 @@ while True:
                 index=random.randrange(len(files_remaining))
                 filename=files_remaining[index]
                 files_remaining.pop(index)
-                open_files.append(open(filename,'rt'))
+                open_files.append(gzip.open(filename,'rt'))
                 print('  opening [%s]; files remaining: %d/%d; buffer state: %d/%d'%(
                     filename,
                     len(files_remaining),
