@@ -445,7 +445,7 @@ with tf.name_scope('output'):
         if args.pos_loss=='angular':
             op_loss = tf.reduce_sum(squared_angular_dist)
 
-        op_losses['distish']=op_loss
+        op_losses['loss']=op_loss
         op_errors['dist']=op_dist_ave
         op_errors['k100']=op_k100_ave
 
@@ -747,8 +747,7 @@ while True:
               stats_step['count']
             , stats_epoch['count']
             , stats_step['loss']/args.stepdelta
-            #, stats_step['dist']/args.stepdelta
-            , err #stats_step['err']/args.stepdelta
+            , err
             , stats_step['validtweets']/float(stats_step['numlines'])
             , stats_step['decoding_time']/float(time.time()-stats_step['start_time'])
             )
@@ -773,13 +772,19 @@ while True:
         reset_stats_step()
 
     if stats_epoch['new']:
+        err=''
+        for k,v in stats_epoch['err'].iteritems():
+            if k=='dist':
+                err='%s %s:%1.2E'%(err,k,v/args.stepdelta)
+            else:
+                err='%s %s:%1.4f'%(err,k,v/args.stepdelta)
+
         print('--------------------------------------------------------------------------------')
         print('epoch %d' % stats_epoch['count'])
         print('  time:  %s ' % str(datetime.timedelta(seconds=time.time() - stats_epoch['start_time'])))
         print('  steps: %d ' % stats_epoch['steps'])
         print('  loss:  %E    diff: %E' % (stats_epoch['loss']/float(stats_epoch['steps']),stats_epoch['loss']/float(stats_epoch['steps'])-stats_epoch_prev['loss']/float(stats_epoch_prev['steps'])))
-        print('  dist:  %E    diff: %E' % (stats_epoch['dist']/float(stats_epoch['steps']),stats_epoch['dist']/float(stats_epoch['steps'])-stats_epoch_prev['dist']/float(stats_epoch['steps'])))
-        print('  err:   %E    diff: %E' % (stats_epoch['err' ]/float(stats_epoch['steps']),stats_epoch['err' ]/float(stats_epoch['steps'])-stats_epoch_prev['err' ]/float(stats_epoch['steps'])))
+        print('  err:   %s' % err )
         print('--------------------------------------------------------------------------------')
         stats_epoch_prev=copy.deepcopy(stats_epoch)
 
