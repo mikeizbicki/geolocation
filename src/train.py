@@ -251,69 +251,71 @@ with tf.name_scope('full'):
 with tf.name_scope('output'):
 
     op_losses={}
-    op_errors={}
+    op_metrics={}
 
     # loc buckets
     if 'loc' in args.output:
-        loc_ = tf.placeholder(tf.int64, [args.batchsize,1])
-        import hashlib
-        hashsize=2**args.loc_hashsize
-        def hash_loc(str):
-            return hash(str)%hashsize
+        with tf.name_scope('loc'):
+            loc_ = tf.placeholder(tf.int64, [args.batchsize,1])
+            import hashlib
+            hashsize=2**args.loc_hashsize
+            def hash_loc(str):
+                return hash(str)%hashsize
 
-        w = tf.Variable(tf.zeros([final_layer_size, hashsize]))
-        b = tf.Variable(tf.zeros([hashsize]))
-        logits = tf.matmul(final_layer,w)+b
+            w = tf.Variable(tf.zeros([final_layer_size, hashsize]))
+            b = tf.Variable(tf.zeros([hashsize]))
+            logits = tf.matmul(final_layer,w)+b
 
-        xentropy = tf.reduce_sum(tf.nn.sparse_softmax_cross_entropy_with_logits(
-                labels=tf.to_int64(tf.reshape(loc_,[args.batchsize])),
-                logits=logits,
-                name='xentropy'
-                ))
-        op_losses['loc_xentropy']=xentropy
+            xentropy = tf.reduce_sum(tf.nn.sparse_softmax_cross_entropy_with_logits(
+                    labels=tf.to_int64(tf.reshape(loc_,[args.batchsize])),
+                    logits=logits,
+                    name='xentropy'
+                    ))
+            op_losses['loc_xentropy']=xentropy
+            op_metrics['loc_xentropy']=tf.contrib.metrics.streaming_mean(xentropy,name='loc_xentropy')
 
-        loc=tf.reshape(tf.argmax(logits,axis=1),shape=[args.batchsize,1])
-        err = tf.reduce_mean(tf.cast(tf.equal(loc,loc_),tf.float32))
-        op_errors['loc_acc']=err
+            loc=tf.reshape(tf.argmax(logits,axis=1),shape=[args.batchsize,1])
+            op_metrics['loc_acc']=tf.contrib.metrics.streaming_accuracy(loc,loc_,name='loc_acc')
 
-        # FIXME: this is from the old way of inserting locs
-        if False:
-            #probs = tf.nn.softmax(loc)
-            #np_lats=np.array(lats_hash,dtype=np.float32)
-            #np_lons=np.array(lons_hash,dtype=np.float32)
-            #op_lats_hash=tf.convert_to_tensor(np_lats)
-            #op_lons_hash=tf.convert_to_tensor(np_lons)
-            #op_lat = tf.reduce_sum(tf.multiply(op_lats_hash,probs),1)
-            #op_lon = tf.reduce_sum(tf.multiply(op_lons_hash,probs),1)
-            #gps = tf.transpose(tf.stack([op_lat,op_lon]))
-            print('loading data summary pickle')
-            import pickle
-            from pprint import pprint
-            from collections import defaultdict
-            lambda0 = lambda: 0
-            lambda1 = lambda: 1
-            f=open(args.data_summary,'r')
-            num_pt=pickle.load(f)
-            num_ct=pickle.load(f)
-            num_fn=pickle.load(f)
-            loc_fn=pickle.load(f)
-            f.close()
 
-            loc_maxs=10
-            if args.loc_max:
-                loc_maxs=args.loc_max
-            else:
-                loc_maxs=len(num_fn['city'].keys())
-            locsfreqs=list(reversed(sorted(zip(num_fn['city'].values(),num_fn['city'].keys()))))[0:loc_maxs]
-            locs=map(lambda (a,b):b,list(reversed(sorted(zip(num_fn['city'].values(),num_fn['city'].keys()))))[0:loc_maxs])
+            # FIXME: this is from the old way of inserting locs
+            if False:
+                #probs = tf.nn.softmax(loc)
+                #np_lats=np.array(lats_hash,dtype=np.float32)
+                #np_lons=np.array(lons_hash,dtype=np.float32)
+                #op_lats_hash=tf.convert_to_tensor(np_lats)
+                #op_lons_hash=tf.convert_to_tensor(np_lons)
+                #op_lat = tf.reduce_sum(tf.multiply(op_lats_hash,probs),1)
+                #op_lon = tf.reduce_sum(tf.multiply(op_lons_hash,probs),1)
+                #gps = tf.transpose(tf.stack([op_lat,op_lon]))
+                print('loading data summary pickle')
+                import pickle
+                from pprint import pprint
+                from collections import defaultdict
+                lambda0 = lambda: 0
+                lambda1 = lambda: 1
+                f=open(args.data_summary,'r')
+                num_pt=pickle.load(f)
+                num_ct=pickle.load(f)
+                num_fn=pickle.load(f)
+                loc_fn=pickle.load(f)
+                f.close()
 
-            # REMEMBER: twitter stores coordinates in (lon,lat) form instead of (lat,lon)
-            locscoords=[centroid(loc_fn['city'][loc]['coordinates']) for loc in locs]
-            lats_hash=[lat for (lon,lat) in locscoords]
-            lons_hash=[lon for (lon,lat) in locscoords]
+                loc_maxs=10
+                if args.loc_max:
+                    loc_maxs=args.loc_max
+                else:
+                    loc_maxs=len(num_fn['city'].keys())
+                locsfreqs=list(reversed(sorted(zip(num_fn['city'].values(),num_fn['city'].keys()))))[0:loc_maxs]
+                locs=map(lambda (a,b):b,list(reversed(sorted(zip(num_fn['city'].values(),num_fn['city'].keys()))))[0:loc_maxs])
 
-            lochash={ loc : i for loc,i in zip(locs,xrange(len(locs))) }
-            from pprint import pprint
+                # REMEMBER: twitter stores coordinates in (lon,lat) form instead of (lat,lon)
+                locscoords=[centroid(loc_fn['city'][loc]['coordinates']) for loc in locs]
+                lats_hash=[lat for (lon,lat) in locscoords]
+                lons_hash=[lon for (lon,lat) in locscoords]
+
+                lochash={ loc : i for loc,i in zip(locs,xrange(len(locs))) }
+                from pprint import pprint
 
     # country hash
     if 'country' in args.output:
@@ -339,120 +341,127 @@ with tf.name_scope('output'):
                 name='country_xentropy'
                 ))
             op_losses['country_xentropy']=xentropy
+            op_metrics['country_xentropy']=tf.contrib.metrics.streaming_mean(xentropy,name='country_xentropy')
 
             country=tf.reshape(tf.argmax(logits,axis=1),shape=[args.batchsize,1])
-            err = tf.reduce_mean(tf.cast(tf.equal(country,country_),tf.float32))
-            op_errors['country_acc']=err
+            op_metrics['country_acc']=tf.contrib.metrics.streaming_accuracy(country,country_,name='country_acc')
 
     # position based losses
     if 'pos' in args.output:
+        with tf.name_scope('pos'):
 
-        # true labels
-        gps_ = tf.placeholder(tf.float32, [args.batchsize,2])
-        op_lat_ = gps_[:,0]
-        op_lon_ = gps_[:,1]
-        op_lat_rad_ = op_lat_/360*2*math.pi
-        op_lon_rad_ = op_lon_/360*2*math.pi
+            # true labels
+            gps_ = tf.placeholder(tf.float32, [args.batchsize,2])
+            op_lat_ = gps_[:,0]
+            op_lon_ = gps_[:,1]
+            op_lat_rad_ = op_lat_/360*2*math.pi
+            op_lon_rad_ = op_lon_/360*2*math.pi
 
-        # treat gps coords as R^2
-        if 'naive' == args.pos_type:
-            w = tf.Variable(tf.zeros([final_layer_size, 2]))
-            if args.warmstart:
-                b = tf.Variable([34.052235,-118.243683])
-            else:
-                b = tf.Variable(tf.zeros([2]))
-            gps = tf.matmul(final_layer,w) + b
-            op_lat = gps[:,0]
-            op_lon = gps[:,1]
+            # treat gps coords as R^2
+            if 'naive' == args.pos_type:
+                w = tf.Variable(tf.zeros([final_layer_size, 2]))
+                if args.warmstart:
+                    b = tf.Variable([34.052235,-118.243683])
+                else:
+                    b = tf.Variable(tf.zeros([2]))
+                gps = tf.matmul(final_layer,w) + b
+                op_lat = gps[:,0]
+                op_lon = gps[:,1]
 
-        # angular generalized linear model
-        # See: "Regression Models for Angular Response" by Fisher and Lee
-        if 'aglm' == args.pos_type:
-            w = tf.Variable(tf.zeros([final_layer_size, 2]))
-            if args.warmstart:
-                b = tf.Variable([0.6745,-2])
-            else:
-                b = tf.Variable(tf.zeros([2]))
-            response = tf.matmul(final_layer,w) + b
-            op_lat = tf.atan(response[:,0])*360/2/math.pi
-            op_lon = tf.atan(response[:,1])*360/math.pi
-            gps = tf.stack([op_lat,op_lon],1)
+            # angular generalized linear model
+            # See: "Regression Models for Angular Response" by Fisher and Lee
+            if 'aglm' == args.pos_type:
+                w = tf.Variable(tf.zeros([final_layer_size, 2]))
+                if args.warmstart:
+                    b = tf.Variable([0.6745,-2])
+                else:
+                    b = tf.Variable(tf.zeros([2]))
+                response = tf.matmul(final_layer,w) + b
+                op_lat = tf.atan(response[:,0])*360/2/math.pi
+                op_lon = tf.atan(response[:,1])*360/math.pi
+                gps = tf.stack([op_lat,op_lon],1)
 
-        # same as algm, but uses the bias outside of the atan embedding
-        if 'aglm2' == args.pos_type:
-            w = tf.Variable(tf.zeros([final_layer_size, 2]))
-            if args.warmstart:
-                b0 = tf.Variable([34.052235])
-                b1 = tf.Variable([-118.243683])
-            else:
-                b0 = tf.Variable(tf.zeros([1]))
-                b1 = tf.Variable(tf.zeros([1]))
-            response = tf.matmul(final_layer,w)
-            op_lat = tf.atan(response[:,0])*360/math.pi/2 + b0
-            op_lon = tf.atan(response[:,1])*360/math.pi   + b1
-            gps = tf.stack([op_lat,op_lon],1)
+            # same as algm, but uses the bias outside of the atan embedding
+            if 'aglm2' == args.pos_type:
+                w = tf.Variable(tf.zeros([final_layer_size, 2]))
+                if args.warmstart:
+                    b0 = tf.Variable([34.052235])
+                    b1 = tf.Variable([-118.243683])
+                else:
+                    b0 = tf.Variable(tf.zeros([1]))
+                    b1 = tf.Variable(tf.zeros([1]))
+                response = tf.matmul(final_layer,w)
+                op_lat = tf.atan(response[:,0])*360/math.pi/2 + b0
+                op_lon = tf.atan(response[:,1])*360/math.pi   + b1
+                gps = tf.stack([op_lat,op_lon],1)
 
-        # model gps coordinates in R^3
-        if 'proj3d' == args.pos_type:
-            w = tf.Variable(tf.zeros([final_layer_size, 3]))
-            b = tf.Variable([0.1,0,0])
-            r3 = tf.matmul(final_layer,w) + b
-            norm = tf.sqrt(tf.reduce_sum(r3*r3,1))
-            r3normed = r3/tf.stack([norm,norm,norm],1)
-            #op_lon = tf.asin(tf.minimum(1.0,r3normed[:,2]))
-            #op_lat = tf.asin(tf.minimum(1.0,r3normed[:,1]))*tf.acos(tf.minimum(1.0,r3normed[:,2]))
-            op_lon = tf.asin(r3normed[:,2])
-            op_lat = tf.asin(r3normed[:,1])*tf.acos(r3normed[:,2])
-            gps = tf.stack([op_lat,op_lon],1)
-            #op_lon=tf.Print(op_lon,[gps,b,norm])
+            # model gps coordinates in R^3
+            if 'proj3d' == args.pos_type:
+                w = tf.Variable(tf.zeros([final_layer_size, 3]))
+                b = tf.Variable([0.1,0,0])
+                r3 = tf.matmul(final_layer,w) + b
+                norm = tf.sqrt(tf.reduce_sum(r3*r3,1))
+                r3normed = r3/tf.stack([norm,norm,norm],1)
+                #op_lon = tf.asin(tf.minimum(1.0,r3normed[:,2]))
+                #op_lat = tf.asin(tf.minimum(1.0,r3normed[:,1]))*tf.acos(tf.minimum(1.0,r3normed[:,2]))
+                op_lon = tf.asin(r3normed[:,2])
+                op_lat = tf.asin(r3normed[:,1])*tf.acos(r3normed[:,2])
+                gps = tf.stack([op_lat,op_lon],1)
+                #op_lon=tf.Print(op_lon,[gps,b,norm])
 
-        # common outputs
+            # common outputs
 
-        epsilon = 1e-6
+            epsilon = 1e-6
 
-        op_lat_rad = op_lat/360*2*math.pi
-        op_lon_rad = op_lon/360*2*math.pi
+            op_lat_rad = op_lat/360*2*math.pi
+            op_lon_rad = op_lon/360*2*math.pi
 
-        hav = lambda x: tf.sin(x/2)**2
-        squared_angular_dist = ( hav(op_lat_rad-op_lat_rad_)
-                        +tf.cos(op_lat_rad)*tf.cos(op_lat_rad_)*hav(op_lon_rad-op_lon_rad_)
-                       )
+            hav = lambda x: tf.sin(x/2)**2
+            squared_angular_dist = ( hav(op_lat_rad-op_lat_rad_)
+                            +tf.cos(op_lat_rad)*tf.cos(op_lat_rad_)*hav(op_lon_rad-op_lon_rad_)
+                           )
 
-        # radius of earth = 3959 miles, 6371 kilometers
-        op_dist = 2*6371*tf.asin(tf.sqrt(tf.maximum(epsilon,squared_angular_dist)))
-        op_dist_ave = tf.reduce_sum(op_dist)/args.batchsize
+            # radius of earth = 3959 miles, 6371 kilometers
+            op_dist = 2*6371*tf.asin(tf.sqrt(tf.maximum(epsilon,squared_angular_dist)))
+            op_dist_ave = tf.reduce_sum(op_dist)/args.batchsize
 
-        op_delta_x = tf.cos(op_lat_rad)*tf.cos(op_lon_rad)-tf.cos(op_lat_rad_)*tf.cos(op_lon_rad_)
-        op_delta_y = tf.cos(op_lat_rad)*tf.sin(op_lon_rad)-tf.cos(op_lat_rad_)*tf.sin(op_lon_rad_)
-        op_delta_z = tf.sin(op_lat_rad) - tf.sin(op_lat_rad_)
-        op_chord = tf.sqrt(epsilon + op_delta_x**2 + op_delta_y**2 + op_delta_z**2)
-        #op_dist = 2*6371*tf.asin(op_chord/2)
-        #op_dist_ave = tf.reduce_sum(op_dist)/args.batchsize
+            op_delta_x = tf.cos(op_lat_rad)*tf.cos(op_lon_rad)-tf.cos(op_lat_rad_)*tf.cos(op_lon_rad_)
+            op_delta_y = tf.cos(op_lat_rad)*tf.sin(op_lon_rad)-tf.cos(op_lat_rad_)*tf.sin(op_lon_rad_)
+            op_delta_z = tf.sin(op_lat_rad) - tf.sin(op_lat_rad_)
+            op_chord = tf.sqrt(epsilon + op_delta_x**2 + op_delta_y**2 + op_delta_z**2)
+            #op_dist = 2*6371*tf.asin(op_chord/2)
+            #op_dist_ave = tf.reduce_sum(op_dist)/args.batchsize
 
-        threshold_dist=100
-        op_k100 = tf.sign(op_dist-threshold_dist)/2+0.5
-        op_k100_ave = tf.reduce_sum(op_k100)/args.batchsize
+            # set loss function
+            if args.pos_loss=='l2':
+                op_loss = tf.reduce_sum((gps - gps_) * (gps - gps_))
+            if args.pos_loss=='chord':
+                op_loss = tf.reduce_sum(op_chord)/args.batchsize
+            if args.pos_loss=='dist':
+                op_loss = op_dist_ave
+            if args.pos_loss=='dist2':
+                op_loss = tf.reduce_sum(op_dist*op_dist)/args.batchsize
+            if args.pos_loss=='angular':
+                op_loss = tf.reduce_sum(squared_angular_dist)
 
-        # set loss function
-        if args.pos_loss=='l2':
-            op_loss = tf.reduce_sum((gps - gps_) * (gps - gps_))
-        if args.pos_loss=='chord':
-            op_loss = tf.reduce_sum(op_chord)/args.batchsize
-        if args.pos_loss=='dist':
-            op_loss = op_dist_ave
-        if args.pos_loss=='dist2':
-            op_loss = tf.reduce_sum(op_dist*op_dist)/args.batchsize
-        if args.pos_loss=='angular':
-            op_loss = tf.reduce_sum(squared_angular_dist)
+            op_losses['loss']=op_loss
+            op_metrics['dist']=tf.contrib.metrics.streaming_mean(op_dist_ave,name='dist')
 
-        op_losses['loss']=op_loss
-        op_errors['dist']=op_dist_ave
-        op_errors['k100']=op_k100_ave
+            def mk_threshold(threshold):
+                op_threshold = tf.sign(op_dist-threshold)/2+0.5
+                op_threshold_ave = tf.reduce_mean(op_threshold)
+                name='k'+str(threshold)
+                op_metrics[name]=tf.contrib.metrics.streaming_mean(threshold,name=name)
+            mk_threshold(100)
+            mk_threshold(500)
+            mk_threshold(1000)
+            mk_threshold(2000)
+            mk_threshold(3000)
 
 # set loss function
 
 op_loss = tf.reduce_mean(op_losses.values())
-op_losses['op_loss']=op_loss
+op_metrics['op_loss']=tf.contrib.metrics.streaming_mean(op_loss,name='op_loss')
 
 # add regularizers
 
@@ -501,14 +510,14 @@ else:
 
 saver = tf.train.Saver(max_to_keep=100000)
 if not args.no_checkpoint:
-    for k,v in op_losses.iteritems():
-        tf.summary.scalar(k,v)
-    for k,v in op_errors.iteritems():
+    for k,(v,_) in op_metrics.iteritems():
         tf.summary.scalar(k,v)
     summary = tf.summary.merge_all()
     summary_writer = tf.summary.FileWriter(log_dir+'/train', sess.graph)
 
 sess.run(tf.global_variables_initializer())
+reset_local_vars=tf.local_variables_initializer()
+sess.run(reset_local_vars)
 sess.graph.finalize()
 
 ########################################
@@ -723,33 +732,19 @@ while True:
         feed_dict[loc_] = np.vstack(batch_dict[loc_])
 
     # run the model
-    _, loss_ave, errors = sess.run(
-        [ train_op, op_loss_regularized, op_errors]
+    _, metrics = sess.run(
+        [ train_op, op_metrics]
         , feed_dict=feed_dict
         )
 
-    stats_step['loss']+=loss_ave
-    stats_epoch['loss']+=loss_ave
-    for k,v in errors.iteritems():
-        stats_step['err'][k]+=errors[k]
-        stats_epoch['err'][k]+=errors[k]
-
     # Write the summaries and print an overview fairly often.
     if stats_step['count'] % args.stepdelta == 0:
-        err=''
-        for k,v in stats_step['err'].iteritems():
-            if k=='dist':
-                err='%s %s:%1.2E'%(err,k,v/args.stepdelta)
-            else:
-                err='%s %s:%1.4f'%(err,k,v/args.stepdelta)
-
-        output='  %8d/%4d: loss=%1.2E %s  good=%1.2f  dec=%1.2f' % (
+        output='  %8d/%4d: good=%1.2f  dec=%1.2f %s' % (
               stats_step['count']
             , stats_epoch['count']
-            , stats_step['loss']/args.stepdelta
-            , err
             , stats_step['validtweets']/float(stats_step['numlines'])
             , stats_step['decoding_time']/float(time.time()-stats_step['start_time'])
+            , '' #str(metrics)
             )
         print(datetime.datetime.now(),output)
 
@@ -768,23 +763,25 @@ while True:
             checkpoint_file = os.path.join(log_dir, 'model.ckpt')
             saver.save(sess, checkpoint_file, global_step=stats_step['count'])
 
-        # reset step variables
+        # reset step variables and update epoch counters
+        for k,(v,_) in metrics.iteritems():
+            stats_epoch['err'][k]+=metrics[k][0]
         reset_stats_step()
+        sess.run(reset_local_vars)
 
     if stats_epoch['new']:
         err=''
         for k,v in stats_epoch['err'].iteritems():
             if k=='dist':
-                err='%s %s:%1.2E'%(err,k,v/args.stepdelta)
+                err='%s %s:%1.2E'%(err,k,v)
             else:
-                err='%s %s:%1.4f'%(err,k,v/args.stepdelta)
+                err='%s %s:%1.4f'%(err,k,v)
 
         print('--------------------------------------------------------------------------------')
         print('epoch %d' % stats_epoch['count'])
         print('  time:  %s ' % str(datetime.timedelta(seconds=time.time() - stats_epoch['start_time'])))
         print('  steps: %d ' % stats_epoch['steps'])
-        print('  loss:  %E    diff: %E' % (stats_epoch['loss']/float(stats_epoch['steps']),stats_epoch['loss']/float(stats_epoch['steps'])-stats_epoch_prev['loss']/float(stats_epoch_prev['steps'])))
-        print('  err:   %s' % err )
+        print('  err:  %s' % err )
         print('--------------------------------------------------------------------------------')
         stats_epoch_prev=copy.deepcopy(stats_epoch)
 
