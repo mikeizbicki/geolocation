@@ -6,6 +6,12 @@ import pprint
 import simplejson as json
 import sys
 
+import argparse
+
+parser=argparse.ArgumentParser('filter twitter json')
+parser.add_argument('--country',type=str,default=None)
+args = parser.parse_args()
+
 while True:
     nextline=sys.stdin.readline()
     if nextline=='':
@@ -44,7 +50,8 @@ while True:
         #except:
             #pass
 
-        print(json.dumps(data_new))
+        if args.country is None or args.country == data_new['place']['country_code']:
+            print(json.dumps(data_new))
 
     except:
         pass
