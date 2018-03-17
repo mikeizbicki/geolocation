@@ -1,7 +1,7 @@
 #!/bin/bash
 
-params="${@:2}"
-output=output
+params="${@:3}"
+output=output/$2
 mkdir -p $output
 
 if [ -z $SLURM_SUBMIT_DIR ]; then
@@ -9,7 +9,8 @@ if [ -z $SLURM_SUBMIT_DIR ]; then
     vars=$(tr '/ ' ',' <<< "$params")
     echo $vars
 
-    opts_debug="-J $vars -e $output/${vars}.stderr -o $output/${vars}.stdout"
+    mkdir -p $output/$vars
+    opts_debug="-J $vars -e $output/$vars/stderr -o $output/$vars/stdout"
     if [[ $1 = "gpu" ]]; then
         opts_gpu="-p gpu --gres=gpu:1"
     fi
