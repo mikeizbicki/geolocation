@@ -69,9 +69,9 @@ parser.add_argument('--full',type=int,nargs='*',default=[])
 parser.add_argument('--output',choices=['pos','country','loc'],default=['pos','country','loc'],nargs='+')
 parser.add_argument('--pos_type',choices=['naive','aglm','aglm2','aglm_mix','proj3d'],default='aglm')
 parser.add_argument('--pos_loss',choices=['l2','chord','dist','dist2','angular'],default='dist')
-parser.add_argument('--pos_shortcut',choices=['loc','country'],default=['country'],nargs='*')
+parser.add_argument('--pos_shortcut',choices=['loc','country'],default=['country','loc'],nargs='*')
 parser.add_argument('--aglm_components',type=int,default=128)
-parser.add_argument('--country_shortcut',choices=['bow','lang'],default=['lang'],nargs='*')
+parser.add_argument('--country_shortcut',choices=['bow','lang'],default=[],nargs='*')
 parser.add_argument('--loc_type',choices=['popular','hash'],default='hash')
 parser.add_argument('--loc_max',default=10,type=int)
 parser.add_argument('--loc_filter',action='store_true')
@@ -154,20 +154,18 @@ with tf.name_scope('inputs'):
             s=tweetlen
             with tf.name_scope('vdcnn'):
                 def mk_conv(prev,numin,numout,swapdim=False):
+                    print('mk_conv')
                     mk_conv.count+=1
                     with tf.name_scope('conv'+str(mk_conv.count)):
                         if swapdim:
                             shape=[3,1,numin,numout]
+                            padding='SAME'
                         else:
                             shape=[3,numin,1,numout]
+                            padding='VALID'
                         w = tf.Variable(var_init(shape,0.1))
-                        #w = tf.get_variable('w',
-                            #shape=shape,
-                            #initializer=tf.glorot_normal_initializer(seed=2000+args.seed+mk_conv.count)
-                            #initializer=tf.truncated_normal_initializer(0.1)
-                            #)
                         b = tf.Variable(tf.constant(0.1,shape=[numout]))
-                        conv = tf.nn.conv2d(prev, w, strides=[1,1,1,1], padding='SAME')
+                        conv = tf.nn.conv2d(prev, w, strides=[1,1,1,1], padding=padding)
                         return tf.nn.bias_add(conv,b)
                 mk_conv.count=0
 
@@ -176,14 +174,10 @@ with tf.name_scope('inputs'):
                     print('input=',input)
                     with tf.name_scope('conv_block'):
                         for i in range(0,size):
-                            #net = mk_conv(net,numin,numout,swapdim=True)
-                            w = tf.Variable(var_init([3,1,numin,numout],0.1))
-                            b = tf.Variable(tf.constant(0.1,shape=[numout]))
-                            conv = tf.nn.conv2d(net, w, strides=[1,1,1,1], padding='SAME')
-                            net= tf.nn.bias_add(conv,b)
+                            net = mk_conv(net,numin,numout,swapdim=True)
                             numin=numout
                             print('net=',net)
-                            #net = tf.nn.relu(net)
+                            net = tf.nn.relu(net)
                         if args.vdcnn_resnet:
                             paddims=np.zeros([4,2])
                             for i in range(0,4):
