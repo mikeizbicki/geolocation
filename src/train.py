@@ -61,6 +61,7 @@ parser.add_argument('--cnn_khot',type=int,default=1)
 parser.add_argument('--vdcnn_numfilters',type=int,default=64)
 parser.add_argument('--vdcnn_variance',type=float,default=0.02)
 parser.add_argument('--vdcnn_resnet',action='store_true')
+parser.add_argument('--vdcnn_full',action='store_true')
 parser.add_argument('--cltcc_numfilters',type=int,default=1024)
 parser.add_argument('--cltcc_variance',type=float,default=0.02)
 
@@ -175,9 +176,9 @@ with tf.name_scope('inputs'):
                     with tf.name_scope('conv_block'):
                         for i in range(0,size):
                             net = mk_conv(net,numin,numout,swapdim=True)
-                            numin=numout
-                            print('net=',net)
+                            net = tf.layers.batch_normalization(net,axis=1,training=True)
                             net = tf.nn.relu(net)
+                            numin=numout
                         if args.vdcnn_resnet:
                             paddims=np.zeros([4,2])
                             for i in range(0,4):
@@ -198,56 +199,60 @@ with tf.name_scope('inputs'):
 
                 net = mk_conv(text_reshaped,args.cnn_vocabsize,args.vdcnn_numfilters)
                 net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                #net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                #net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                #net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                #net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                #net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                #net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                #net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                #net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                #net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                #net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                #net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                #net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                #net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                #net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                #net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
+                if args.vdcnn_full:
+                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
+                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
+                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
+                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
+                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
+                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
+                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
+                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
+                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
+                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
+                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
+                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
+                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
+                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
+                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
                 net = pool2(net)
                 net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters*2)
                 net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
+                if args.vdcnn_full:
+                    net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
                 net = pool2(net)
                 net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*4)
                 net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
+                if args.vdcnn_full:
+                    net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
                 net = pool2(net)
                 net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*8)
                 net = mk_conv_block(net,args.vdcnn_numfilters*8,args.vdcnn_numfilters*8)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*8,args.vdcnn_numfilters*8)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*8,args.vdcnn_numfilters*8)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*8,args.vdcnn_numfilters*8)
-                #net = mk_conv_block(net,args.vdcnn_numfilters*8,args.vdcnn_numfilters*8)
+                if args.vdcnn_full:
+                    net = mk_conv_block(net,args.vdcnn_numfilters*8,args.vdcnn_numfilters*8)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*8,args.vdcnn_numfilters*8)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*8,args.vdcnn_numfilters*8)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*8,args.vdcnn_numfilters*8)
                 net = pool2(net)
                 print('net=',net)
 
@@ -694,7 +699,7 @@ with tf.name_scope('loss'):
         #for k,v in op_losses.iteritems():
             #op_loss+=op_losses[k]*(op_metrics[k][0]/loss_total)
 
-    op_loss = op_losses['dist']/1000 + op_losses['country_xentropy'] # + op_losses['loc_xentropy']/1000
+    op_loss = op_losses['dist']/1000 + op_losses['country_xentropy'] + op_losses['loc_xentropy']/1000
 
     #op_loss = tf.reduce_mean(op_losses.values())
 
@@ -712,7 +717,9 @@ with tf.name_scope('loss'):
 # optimization nodes
 with tf.name_scope('optimization'):
     global_step = tf.Variable(0, name='global_step', trainable=False)
-    learningrate = tf.train.inverse_time_decay(args.learningrate, global_step, 1, args.decay)
+    #learningrate = tf.train.inverse_time_decay(args.learningrate, global_step, 1, args.decay, staircase=True)
+    learningrate = args.learningrate
+    tf.summary.scalar('learningrate',learningrate)
     if args.optimizer=='adam':
         optimizer = tf.train.AdamOptimizer(learningrate)
     elif args.optimizer=='sgd':
@@ -749,20 +756,16 @@ if args.tf_debug:
 else:
     sess = tf.Session()
 
-print('XXXXX')
 saver = tf.train.Saver(max_to_keep=100000)
-print('XXXXX')
 if not args.no_checkpoint:
     for k,(v,_) in op_metrics.iteritems():
         tf.summary.scalar(k,v)
     summary = tf.summary.merge_all()
     summary_writer = tf.summary.FileWriter(log_dir+'/train', sess.graph)
-print('XXXXX')
 
 reset_global_vars=tf.global_variables_initializer()
 reset_local_vars=tf.local_variables_initializer()
 sess.graph.finalize()
-print('XXXXX')
 sess.run(reset_global_vars)
 sess.run(reset_local_vars)
 
