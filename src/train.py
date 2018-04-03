@@ -32,6 +32,7 @@ parser.add_argument('--warmstart',type=bool,default=True)
 parser.add_argument('--stepsave',type=int,default=10000)
 parser.add_argument('--seed',type=int,default=0)
 parser.add_argument('--max_open_files',type=int,default=96)
+parser.add_argument('--name',type=str)
 
 # debug variables
 parser.add_argument('--no_checkpoint',action='store_true')
@@ -41,12 +42,13 @@ parser.add_argument('--repeat_batch',action='store_true')
 # model hyperparameters
 parser.add_argument('--data',type=str,required=True)
 parser.add_argument('--data_summary',type=str,default=None)
+parser.add_argument('--data_sample',choices=['uniform','fancy'],default='uniform')
 
 parser.add_argument('--batchsize',type=int,default=100)
 parser.add_argument('--learningrate',type=float,default=0.005)
 parser.add_argument('--optimizer',choices=['adam','sgd'],default='adam')
 parser.add_argument('--momentum',type=float,default=0.9)
-parser.add_argument('--decay',type=float,default=1e-5)
+parser.add_argument('--decay',type=float,default=None)
 parser.add_argument('--dropout',type=float,default=0.5)
 parser.add_argument('--l1',type=float,default=0.0)
 parser.add_argument('--l2',type=float,default=1e-5)
@@ -59,25 +61,27 @@ parser.add_argument('--cnn_type',choices=['vdcnn','cltcc'],default='cltcc')
 parser.add_argument('--cnn_vocabsize',type=int,default=128)
 parser.add_argument('--cnn_khot',type=int,default=1)
 parser.add_argument('--vdcnn_numfilters',type=int,default=64)
-parser.add_argument('--vdcnn_variance',type=float,default=0.02)
+parser.add_argument('--vdcnn_size',type=int,default=0)
 parser.add_argument('--vdcnn_resnet',action='store_true')
-parser.add_argument('--vdcnn_full',action='store_true')
+parser.add_argument('--vdcnn_no_bn',action='store_true')
 parser.add_argument('--cltcc_numfilters',type=int,default=1024)
 parser.add_argument('--cltcc_variance',type=float,default=0.02)
 
 parser.add_argument('--full',type=int,nargs='*',default=[])
 
 parser.add_argument('--output',choices=['pos','country','loc'],default=['pos','country','loc'],nargs='+')
+parser.add_argument('--loss_weights',choices=['auto','ave','manual','manual2'],default='manual')
+parser.add_argument('--loss_staircase',action='store_true')
 parser.add_argument('--pos_type',choices=['naive','aglm','aglm2','aglm_mix','proj3d'],default='aglm')
 parser.add_argument('--pos_loss',choices=['l2','chord','dist','dist2','angular'],default='dist')
-parser.add_argument('--pos_shortcut',choices=['loc','country'],default=['country','loc'],nargs='*')
+parser.add_argument('--pos_shortcut',choices=['loc','country'],default=[],nargs='*')
 parser.add_argument('--aglm_components',type=int,default=128)
 parser.add_argument('--country_shortcut',choices=['bow','lang'],default=[],nargs='*')
 parser.add_argument('--loc_type',choices=['popular','hash'],default='hash')
-parser.add_argument('--loc_max',default=10,type=int)
+parser.add_argument('--loc_max',default=16,type=int)
 parser.add_argument('--loc_filter',action='store_true')
 parser.add_argument('--loc_hashsize',type=int,default=12)
-parser.add_argument('--loc_shortcut',choices=['bow','lang'],default=[],nargs='*')
+parser.add_argument('--loc_shortcut',choices=['bow','lang','country'],default=[],nargs='*')
 
 args = parser.parse_args()
 
@@ -113,10 +117,13 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 tf.set_random_seed(args.seed)
 #var_init = lambda shape,var: tf.truncated_normal(shape,stddev=var,seed=args.seed)
 
-def var_init(shape,stddev):
+def var_init(shape,stddev=None):
     var_init.count+=1
     size=float(sum(shape))
-    return tf.truncated_normal(shape,stddev=math.sqrt(2.0/size),seed=args.seed+var_init.count)
+    if stddev is None:
+        stddev=math.sqrt(2.0/size)
+    return tf.truncated_normal(shape,stddev=stddev,seed=args.seed)
+    return tf.truncated_normal(shape,stddev=stddev,seed=args.seed+var_init.count)
 var_init.count=0
 
 # tf inputs
@@ -155,7 +162,6 @@ with tf.name_scope('inputs'):
             s=tweetlen
             with tf.name_scope('vdcnn'):
                 def mk_conv(prev,numin,numout,swapdim=False):
-                    print('mk_conv')
                     mk_conv.count+=1
                     with tf.name_scope('conv'+str(mk_conv.count)):
                         if swapdim:
@@ -172,11 +178,11 @@ with tf.name_scope('inputs'):
 
                 def mk_conv_block(input,numin,numout,size=2):
                     net=input
-                    print('input=',input)
                     with tf.name_scope('conv_block'):
                         for i in range(0,size):
                             net = mk_conv(net,numin,numout,swapdim=True)
-                            net = tf.layers.batch_normalization(net,axis=1,training=True)
+                            if not args.vdcnn_no_bn:
+                                net = tf.layers.batch_normalization(net,axis=1,training=True)
                             net = tf.nn.relu(net)
                             numin=numout
                         if args.vdcnn_resnet:
@@ -193,22 +199,23 @@ with tf.name_scope('inputs'):
                 def pool2(prev):
                     return tf.nn.max_pool(
                         prev,
-                        ksize=[1, 2, 1, 1],
+                        ksize=[1, 3, 1, 1],
                         strides=[1, 2, 1, 1],
-                        padding='VALID')
+                        padding='SAME')
 
                 net = mk_conv(text_reshaped,args.cnn_vocabsize,args.vdcnn_numfilters)
                 net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                if args.vdcnn_full:
+                if args.vdcnn_size>=1:
+                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
+                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
+                if args.vdcnn_size>=2:
                     net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
                     net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
                     net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
                     net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
                     net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
                     net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
-                    net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
+                if args.vdcnn_size>=3:
                     net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
                     net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
                     net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
@@ -216,17 +223,20 @@ with tf.name_scope('inputs'):
                     net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
                     net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters)
                 net = pool2(net)
+
                 net = mk_conv_block(net,args.vdcnn_numfilters,args.vdcnn_numfilters*2)
                 net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
-                if args.vdcnn_full:
+                if args.vdcnn_size>=1:
+                    net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
+                    net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
+                if args.vdcnn_size>=2:
                     net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
                     net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
                     net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
                     net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
                     net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
                     net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
-                    net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
-                    net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
+                if args.vdcnn_size>=3:
                     net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
                     net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
                     net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
@@ -234,11 +244,13 @@ with tf.name_scope('inputs'):
                     net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
                     net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*2)
                 net = pool2(net)
+
                 net = mk_conv_block(net,args.vdcnn_numfilters*2,args.vdcnn_numfilters*4)
                 net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
-                if args.vdcnn_full:
+                if args.vdcnn_size>=1:
                     net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
                     net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
+                if args.vdcnn_size>=3:
                     net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
                     net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
                     net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
@@ -246,15 +258,16 @@ with tf.name_scope('inputs'):
                     net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
                     net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*4)
                 net = pool2(net)
+
                 net = mk_conv_block(net,args.vdcnn_numfilters*4,args.vdcnn_numfilters*8)
                 net = mk_conv_block(net,args.vdcnn_numfilters*8,args.vdcnn_numfilters*8)
-                if args.vdcnn_full:
+                if args.vdcnn_size>=1:
                     net = mk_conv_block(net,args.vdcnn_numfilters*8,args.vdcnn_numfilters*8)
                     net = mk_conv_block(net,args.vdcnn_numfilters*8,args.vdcnn_numfilters*8)
+                if args.vdcnn_size>=3:
                     net = mk_conv_block(net,args.vdcnn_numfilters*8,args.vdcnn_numfilters*8)
                     net = mk_conv_block(net,args.vdcnn_numfilters*8,args.vdcnn_numfilters*8)
                 net = pool2(net)
-                print('net=',net)
 
                 input_size=int(net.get_shape()[1]*net.get_shape()[2]*net.get_shape()[3])
                 input_=tf.reshape(net,[args.batchsize,input_size])
@@ -373,11 +386,7 @@ with tf.name_scope('full'):
 
     for layersize in args.full:
         with tf.name_scope('full%d'%layerindex):
-            w = tf.Variable(var_init([final_layer_size,layersize],0.1))
-            #w = tf.get_variable('w',
-                #shape=[final_layer_size, layersize],
-                ##initializer=tf.contrib.layers.xavier_initializer())
-                #initializer=tf.truncated_normal_initializer(0.1))
+            w = tf.Variable(var_init([final_layer_size,layersize],1.0/math.sqrt(float(layersize))))
             b = tf.Variable(tf.constant(0.1,shape=[layersize]))
             h = tf.nn.relu(tf.matmul(final_layer,w)+b)
             final_layer=tf.nn.dropout(h,args.dropout)
@@ -657,8 +666,6 @@ with tf.name_scope('output'):
             op_delta_y = tf.cos(op_lat_rad)*tf.sin(op_lon_rad)-tf.cos(op_lat_rad_)*tf.sin(op_lon_rad_)
             op_delta_z = tf.sin(op_lat_rad) - tf.sin(op_lat_rad_)
             op_chord = tf.sqrt(epsilon + op_delta_x**2 + op_delta_y**2 + op_delta_z**2)
-            #op_dist = 2*6371*tf.asin(op_chord/2)
-            #op_dist_ave = tf.reduce_sum(op_dist)/args.batchsize
 
             # set loss function
             if args.pos_loss=='l2':
@@ -690,18 +697,45 @@ with tf.name_scope('output'):
 
 # set loss function
 with tf.name_scope('loss'):
+    op_projections=[]
 
-    #with tf.name_scope('combined_loss'):
-        #loss_total=0
-        #for k,v in op_losses.iteritems():
-            #loss_total+=op_metrics[k][0]
-        #op_loss=0
-        #for k,v in op_losses.iteritems():
-            #op_loss+=op_losses[k]*(op_metrics[k][0]/loss_total)
+    if args.loss_weights == 'auto':
+        epsilon=1e-3
+        op_loss=0
+        num_losses = len(op_losses)
+        w0 = tf.constant(1.0/float(num_losses),shape=[num_losses])
+        w = tf.Variable(w0)
+        w_max = tf.maximum(w, tf.constant(epsilon,shape=[num_losses]))
+        w_norm = tf.reduce_sum(w_max)+epsilon
+        i=0
+        tf.summary.scalar('weight_norm',w_norm)
+        for k,v in op_losses.iteritems():
+            op_loss += (w_max[i]/w_norm)*v
+            tf.summary.scalar('weight_'+k, w[i])
+            op_projections.append(w[i].assign(w_max[i]/w_norm))
+            i+=1
+        op_loss += tf.linalg.norm(w0-w_max)**2
 
-    op_loss = op_losses['dist']/1000 + op_losses['country_xentropy'] + op_losses['loc_xentropy']/1000
+    if args.loss_weights == 'manual':
+        op_loss = 0
+        if 'dist' in op_losses:
+            op_loss += op_losses['dist']/1000
+        if 'country_xentropy' in op_losses:
+            op_loss += op_losses['country_xentropy']
+        if 'loc_xentropy' in op_losses:
+            op_loss += op_losses['loc_xentropy']/1000
 
-    #op_loss = tf.reduce_mean(op_losses.values())
+    if args.loss_weights == 'manual2':
+        op_loss = 0
+        if 'dist' in op_losses:
+            op_loss += op_losses['dist']/100
+        if 'country_xentropy' in op_losses:
+            op_loss += op_losses['country_xentropy']
+        if 'loc_xentropy' in op_losses:
+            op_loss += op_losses['loc_xentropy']/10
+
+    if args.loss_weights == 'ave':
+        op_loss = tf.reduce_mean(op_losses.values())
 
     op_metrics['op_loss']=tf.contrib.metrics.streaming_mean(op_loss,name='op_loss')
 
@@ -717,8 +751,15 @@ with tf.name_scope('loss'):
 # optimization nodes
 with tf.name_scope('optimization'):
     global_step = tf.Variable(0, name='global_step', trainable=False)
-    #learningrate = tf.train.inverse_time_decay(args.learningrate, global_step, 1, args.decay, staircase=True)
-    learningrate = args.learningrate
+    if args.decay is None:
+        learningrate = args.learningrate
+    else:
+        learningrate = tf.train.inverse_time_decay(
+            args.learningrate,
+            global_step,
+            args.decay,
+            1.0,
+            staircase=args.loss_staircase)
     tf.summary.scalar('learningrate',learningrate)
     if args.optimizer=='adam':
         optimizer = tf.train.AdamOptimizer(learningrate)
@@ -838,7 +879,14 @@ while True:
 
             # load and decode next json entry
             while len(open_files)<args.max_open_files and len(files_remaining)>0:
-                index=random.randrange(len(files_remaining))
+                if args.data_sample == 'uniform':
+                    index=random.randrange(len(files_remaining))
+                elif args.data_sample == 'fancy':
+                    choices=3
+                    choice=np.random.randint(choices)+1
+                    index=random.randrange(int((choice/float(choices))*len(files_remaining)))
+                    print('index=',index)
+
                 filename=files_remaining[index]
                 files_remaining.pop(index)
                 try:
@@ -903,12 +951,11 @@ while True:
 
                 if 'cnn' in args.input:
                     encodedtext=np.zeros([1,tweetlen,args.cnn_vocabsize])
-                    def myhash(i):
-                        return (5381*i)%args.cnn_vocabsize
 
                     for i in range(min(tweetlen,len(data['text']))):
                         for k in range(0,args.cnn_khot):
-                            index=(5381*i + 88499*k)%args.cnn_vocabsize
+                            char=ord(data['text'][i])
+                            index=(5381*char + 88499*k)%args.cnn_vocabsize
                             encodedtext[0][i][index]=1
 
                     batch_dict[text_].append(encodedtext)
@@ -988,9 +1035,10 @@ while True:
 
     # run the model
     _, metrics = sess.run(
-        [ train_op, op_metrics]
+        [ train_op, op_metrics ]
         , feed_dict=feed_dict
         )
+    sess.run(op_projections)
 
     # Write the summaries and print an overview fairly often.
     if (stats_step['count'] < 10 or
