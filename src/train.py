@@ -73,9 +73,11 @@ parser.add_argument('--output',choices=['pos','country','loc'],default=['pos','c
 parser.add_argument('--loss_weights',choices=['auto','ave','manual','manual2'],default='manual')
 parser.add_argument('--loss_staircase',action='store_true')
 parser.add_argument('--pos_type',choices=['naive','aglm','aglm2','aglm_mix','proj3d'],default='aglm')
-parser.add_argument('--pos_loss',choices=['l2','chord','dist','dist2','angular'],default='dist')
+parser.add_argument('--pos_loss',choices=['l2','chord','dist','dist_sqrt','dist2','angular'],default='dist')
 parser.add_argument('--pos_shortcut',choices=['loc','country'],default=[],nargs='*')
-parser.add_argument('--aglm_components',type=int,default=1024)
+parser.add_argument('--gmm_type',choices=['simple','complex'],default='complex')
+parser.add_argument('--gmm_notrain',action='store_true')
+parser.add_argument('--gmm_components',type=int,default=1)
 parser.add_argument('--country_shortcut',choices=['bow','lang'],default=[],nargs='*')
 parser.add_argument('--loc_type',choices=['popular','hash'],default='hash')
 parser.add_argument('--loc_filter',action='store_true')
@@ -114,7 +116,6 @@ print('initializing tensorflow')
 import tensorflow as tf
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 tf.set_random_seed(args.seed)
-#var_init = lambda shape,var: tf.truncated_normal(shape,stddev=var,seed=args.seed)
 
 def var_init(shape,stddev=None):
     var_init.count+=1
@@ -7751,7 +7752,7 @@ with tf.name_scope('output'):
             weights = tf.reshape(weights,[args.batchsize])
             mk_summary('filter_'+lang+'/',weights)
 
-        summary_countries=['US','MX','JP']
+        summary_countries=['US','MX','ES','FR','JP']
         for country in summary_countries:
             weights = tf.cast(tf.equal(country_,hash_country(country)),tf.float32)
             weights = tf.reshape(weights,[args.batchsize])
@@ -7921,98 +7922,122 @@ with tf.name_scope('output'):
                     pass
 
             # decompose true labels
-            op_lat_ = gps_[:,0]
-            op_lon_ = gps_[:,1]
-            op_lat_rad_ = op_lat_/360*2*math.pi
-            op_lon_rad_ = op_lon_/360*2*math.pi
+            with tf.name_scope('reshape'):
+                op_lat_ = gps_[:,0]
+                op_lon_ = gps_[:,1]
+                op_lat_rad_ = op_lat_/360*2*math.pi
+                op_lon_rad_ = op_lon_/360*2*math.pi
+                op_lat_rad_1_ = tf.reshape(op_lat_rad_,[args.batchsize,1])
+                op_lat_rad_tiled_ = tf.tile(op_lat_rad_1_,[1,args.gmm_components])
+                op_lon_rad_1_ = tf.reshape(op_lon_rad_,[args.batchsize,1])
+                op_lon_rad_tiled_ = tf.tile(op_lon_rad_1_,[1,args.gmm_components])
+                gps_1_ = tf.reshape(gps_,[args.batchsize,1,2])
+                gps_tiled_ = tf.tile(gps_1_,[1,args.gmm_components,1])
 
             # treat gps coords as R^2
-            if 'naive' == args.pos_type:
-                w = tf.Variable(tf.zeros([pos_final_layer_size, 2]))
-                if args.warmstart:
-                    b = tf.Variable([34.052235,-118.243683])
-                else:
-                    b = tf.Variable(tf.zeros([2]))
-                gps = tf.matmul(pos_final_layer,w) + b
-                op_lat = gps[:,0]
-                op_lon = gps[:,1]
+            #if 'naive' == args.pos_type:
+                #w = tf.Variable(tf.zeros([pos_final_layer_size, 2]))
+                #if args.warmstart:
+                    #b = tf.Variable([34.052235,-118.243683])
+                #else:
+                    #b = tf.Variable(tf.zeros([2]))
+                #gps = tf.matmul(pos_final_layer,w) + b
+                #op_lat = gps[:,0]
+                #op_lon = gps[:,1]
 
             # angular generalized linear model
             # See: "Regression Models for Angular Response" by Fisher and Lee
             if 'aglm' == args.pos_type:
-                w = tf.Variable(tf.zeros([pos_final_layer_size, 2]))
-                if args.warmstart:
-                    b = tf.Variable([0.6745,-2])
-                else:
-                    b = tf.Variable(tf.zeros([2]))
-                response = tf.matmul(pos_final_layer,w) + b
-                op_lat = tf.atan(response[:,0])*360/2/math.pi
-                op_lon = tf.atan(response[:,1])*360/math.pi
-                gps = tf.stack([op_lat,op_lon],1)
-
-            # same as algm, but uses the bias outside of the atan embedding
-            if 'aglm2' == args.pos_type:
-                w = tf.Variable(tf.zeros([pos_final_layer_size, 2]))
-                if args.warmstart:
-                    b0 = tf.Variable([34.052235])
-                    b1 = tf.Variable([-118.243683])
-                else:
-                    b0 = tf.Variable(tf.zeros([1]))
-                    b1 = tf.Variable(tf.zeros([1]))
-                response = tf.matmul(pos_final_layer,w)
-                op_lat = tf.atan(response[:,0])*360/math.pi/2 + b0
-                op_lon = tf.atan(response[:,1])*360/math.pi   + b1
-                gps = tf.stack([op_lat,op_lon],1)
-
-            # mixture of aglm responses
-            if 'aglm_mix' == args.pos_type:
-                w = tf.Variable(var_init([pos_final_layer_size,args.aglm_components],0.1))
-                b = tf.Variable(tf.constant(0.1,shape=[args.aglm_components]))
-                mixture = tf.nn.softmax(tf.matmul(pos_final_layer,w)+b)
-
-                with tf.name_scope('summaries'):
-                    vals,_=tf.nn.top_k(mixture,k=args.aglm_components)
-                    tf.summary.scalar('mixture_top0', tf.reduce_mean(vals[:,0]))
-                    tf.summary.scalar('mixture_top1', tf.reduce_mean(vals[:,1]))
-                    tf.summary.scalar('mixture_top2', tf.reduce_mean(vals[:,2]))
-                    tf.summary.scalar('mixture_75', tf.reduce_mean(vals[:,1*args.aglm_components/4]))
-                    tf.summary.scalar('mixture_50', tf.reduce_mean(vals[:,2*args.aglm_components/4]))
-                    tf.summary.scalar('mixture_25', tf.reduce_mean(vals[:,3*args.aglm_components/4]))
-                    tf.summary.scalar('mixture_0', tf.reduce_mean(vals[:,args.aglm_components-1]))
-
-                w = tf.Variable(var_init([pos_final_layer_size,args.aglm_components,2],0.1))
                 if args.warmstart:
                     b0 = [ [ math.tan(city['lat']/360*math.pi*2),
                              math.tan(city['lon']/360*math.pi)
                            ]
-                           for city in city_locs[:args.aglm_components]
+                           for city in city_locs[:args.gmm_components]
                          ]
                 else:
                     b0 = 0.1
-                b = tf.Variable(tf.constant(0.1,shape=[args.aglm_components, 2]))
-                responses = tf.tensordot(pos_final_layer,w,axes=[[1],[0]])
 
-                reshaped=tf.reshape(mixture,shape=[args.batchsize,args.aglm_components,1])
-                tiled=tf.tile(reshaped,[1,1,2])
-                response=tf.reduce_sum(responses*tiled,axis=1)
+                if args.gmm_type=='simple':
+                    b = tf.Variable(tf.constant(b0,shape=[args.gmm_components, 2]), trainable=not args.gmm_notrain)
+                    response = tf.tile(tf.reshape(b,[1,args.gmm_components,2]),[args.batchsize,1,1])
+                elif args.gmm_type=='complex':
+                    w = tf.Variable(var_init([pos_final_layer_size, args.gmm_components, 2]))
+                    b = tf.Variable(tf.constant(b0,shape=[args.gmm_components, 2]))
+                    response = tf.tensordot(pos_final_layer,w,axes=[[1],[0]]) + b
 
-                op_lat = tf.atan(response[:,0])*360/2/math.pi
-                op_lon = tf.atan(response[:,1])*360/math.pi
-                gps = tf.stack([op_lat,op_lon],1)
+                op_lat = tf.atan(response[:,:,0])*360/2/math.pi
+                op_lon = tf.atan(response[:,:,1])*360/math.pi
+                gps = tf.stack([op_lat,op_lon],2)
 
-            # model gps coordinates in R^3
-            if 'proj3d' == args.pos_type:
-                w = tf.Variable(tf.zeros([pos_final_layer_size, 3]))
-                b = tf.Variable([0.1,0,0])
-                r3 = tf.matmul(pos_final_layer,w) + b
-                norm = tf.sqrt(tf.reduce_sum(r3*r3,1))
-                r3normed = r3/tf.stack([norm,norm,norm],1)
-                #op_lon = tf.asin(tf.minimum(1.0,r3normed[:,2]))
-                #op_lat = tf.asin(tf.minimum(1.0,r3normed[:,1]))*tf.acos(tf.minimum(1.0,r3normed[:,2]))
-                op_lon = tf.asin(r3normed[:,2])
-                op_lat = tf.asin(r3normed[:,1])*tf.acos(r3normed[:,2])
-                gps = tf.stack([op_lat,op_lon],1)
-                #op_lon=tf.Print(op_lon,[gps,b,norm])
+            # same as algm, but uses the bias outside of the atan embedding
+            #if 'aglm2' == args.pos_type:
+                #w = tf.Variable(tf.zeros([pos_final_layer_size, 2]))
+                #if args.warmstart:
+                    #b0 = tf.Variable([34.052235])
+                    #b1 = tf.Variable([-118.243683])
+                #else:
+                    #b0 = tf.Variable(tf.zeros([1]))
+                    #b1 = tf.Variable(tf.zeros([1]))
+                #response = tf.matmul(pos_final_layer,w)
+                #op_lat = tf.atan(response[:,0])*360/math.pi/2 + b0
+                #op_lon = tf.atan(response[:,1])*360/math.pi   + b1
+                #gps = tf.stack([op_lat,op_lon],1)
+
+            # mixture of aglm responses
+            #if 'aglm_mix' == args.pos_type:
+                #w = tf.Variable(var_init([pos_final_layer_size,args.aglm_components],0.1))
+                #b = tf.Variable(tf.constant(0.1,shape=[args.aglm_components]))
+                #mixture = tf.nn.softmax(tf.matmul(pos_final_layer,w)+b)
+#
+                #with tf.name_scope('summaries'):
+                    #vals,_=tf.nn.top_k(mixture,k=args.aglm_components)
+                    #tf.summary.scalar('mixture_top0', tf.reduce_mean(vals[:,0]))
+                    #tf.summary.scalar('mixture_top1', tf.reduce_mean(vals[:,1]))
+                    #tf.summary.scalar('mixture_top2', tf.reduce_mean(vals[:,2]))
+                    #tf.summary.scalar('mixture_75', tf.reduce_mean(vals[:,1*args.aglm_components/4]))
+                    #tf.summary.scalar('mixture_50', tf.reduce_mean(vals[:,2*args.aglm_components/4]))
+                    #tf.summary.scalar('mixture_25', tf.reduce_mean(vals[:,3*args.aglm_components/4]))
+                    #tf.summary.scalar('mixture_0', tf.reduce_mean(vals[:,args.aglm_components-1]))
+#
+                #w = tf.Variable(var_init([pos_final_layer_size,args.aglm_components,2],0.1))
+                #if args.warmstart:
+                    #b0 = [ [ math.tan(city['lat']/360*math.pi*2),
+                             #math.tan(city['lon']/360*math.pi)
+                           #]
+                           #for city in city_locs[:args.aglm_components]
+                         #]
+                #else:
+                    #b0 = 0.1
+                #b = tf.Variable(tf.constant(0.1,shape=[args.aglm_components, 2]))
+                #responses = tf.tensordot(pos_final_layer,w,axes=[[1],[0]])
+#
+                #reshaped=tf.reshape(mixture,shape=[args.batchsize,args.aglm_components,1])
+                #tiled=tf.tile(reshaped,[1,1,2])
+                #response=tf.reduce_sum(responses*tiled,axis=1)
+#
+                #op_lat = tf.atan(response[:,0])*360/2/math.pi
+                #op_lon = tf.atan(response[:,1])*360/math.pi
+                #gps = tf.stack([op_lat,op_lon],1)
+
+            w = tf.Variable(var_init([pos_final_layer_size,args.gmm_components],0.1))
+            b = tf.Variable(tf.constant(0.1,shape=[args.gmm_components]))
+            mixture = tf.nn.softmax(tf.matmul(pos_final_layer,w)+b)
+
+            with tf.name_scope('summaries'):
+                vals,indices=tf.nn.top_k(mixture,k=args.gmm_components)
+                tf.summary.scalar('mixture_top0', tf.reduce_mean(vals[:,0]))
+                try:
+                    tf.summary.scalar('mixture_top1', tf.reduce_mean(vals[:,1]))
+                except:
+                    pass
+                try:
+                    tf.summary.scalar('mixture_top2', tf.reduce_mean(vals[:,2]))
+                except:
+                    pass
+                tf.summary.scalar('mixture_75', tf.reduce_mean(vals[:,1*args.gmm_components/4]))
+                tf.summary.scalar('mixture_50', tf.reduce_mean(vals[:,2*args.gmm_components/4]))
+                tf.summary.scalar('mixture_25', tf.reduce_mean(vals[:,3*args.gmm_components/4]))
+                tf.summary.scalar('mixture_0', tf.reduce_mean(vals[:,args.gmm_components-1]))
 
             # common outputs
 
@@ -8022,33 +8047,34 @@ with tf.name_scope('output'):
             op_lon_rad = op_lon/360*2*math.pi
 
             hav = lambda x: tf.sin(x/2)**2
-            squared_angular_dist = ( hav(op_lat_rad-op_lat_rad_)
-                            +tf.cos(op_lat_rad)*tf.cos(op_lat_rad_)*hav(op_lon_rad-op_lon_rad_)
+            squared_angular_dist = ( hav(op_lat_rad-op_lat_rad_tiled_)
+                            +tf.cos(op_lat_rad)*tf.cos(op_lat_rad_tiled_)*hav(op_lon_rad-op_lon_rad_tiled_)
                            )
 
             # radius of earth = 3959 miles, 6371 kilometers
-            op_dist = 2*6371*tf.asin(tf.sqrt(tf.maximum(epsilon,squared_angular_dist)))
-            op_dist_ave = tf.reduce_sum(op_dist)/args.batchsize
-
-            op_delta_x = tf.cos(op_lat_rad)*tf.cos(op_lon_rad)-tf.cos(op_lat_rad_)*tf.cos(op_lon_rad_)
-            op_delta_y = tf.cos(op_lat_rad)*tf.sin(op_lon_rad)-tf.cos(op_lat_rad_)*tf.sin(op_lon_rad_)
-            op_delta_z = tf.sin(op_lat_rad) - tf.sin(op_lat_rad_)
-            op_chord = tf.sqrt(epsilon + op_delta_x**2 + op_delta_y**2 + op_delta_z**2)
+            op_dists = 2*6371*tf.asin(tf.sqrt(tf.maximum(epsilon,squared_angular_dist)))
+            op_dist = tf.reduce_sum(mixture*op_dists,axis=1)
 
             # set loss function
             if args.pos_loss=='l2':
-                op_loss = tf.reduce_sum((gps - gps_) * (gps - gps_))
+                op_loss = tf.reduce_sum((gps - gps_tiled_) * (gps - gps_tiled_),axis=2)
             if args.pos_loss=='chord':
-                op_loss = tf.reduce_sum(op_chord)/args.batchsize
+                op_delta_x = tf.cos(op_lat_rad)*tf.cos(op_lon_rad)-tf.cos(op_lat_rad_tiled_)*tf.cos(op_lon_rad_tiled_)
+                op_delta_y = tf.cos(op_lat_rad)*tf.sin(op_lon_rad)-tf.cos(op_lat_rad_tiled_)*tf.sin(op_lon_rad_tiled_)
+                op_delta_z = tf.sin(op_lat_rad) - tf.sin(op_lat_rad_tiled_)
+                op_chord = tf.sqrt(epsilon + op_delta_x**2 + op_delta_y**2 + op_delta_z**2)
+                op_loss = op_chord
+            if args.pos_loss=='dist_sqrt':
+                op_loss = tf.sqrt(op_dists)
             if args.pos_loss=='dist':
-                op_loss = op_dist_ave
+                op_loss = op_dists
             if args.pos_loss=='dist2':
-                op_loss = tf.reduce_sum(op_dist*op_dist)/args.batchsize
+                op_loss = op_dists*op_dists
             if args.pos_loss=='angular':
-                op_loss = tf.reduce_sum(squared_angular_dist)
+                op_loss = squared_angular_dist
 
-            op_losses['dist']=op_loss
-            op_metrics['optimization/dist']=tf.contrib.metrics.streaming_mean(op_dist_ave,name='dist')
+            op_losses['dist']=tf.reduce_mean(tf.reduce_sum(mixture*op_loss,axis=1))
+            op_metrics['optimization/pos_loss']=tf.contrib.metrics.streaming_mean(op_losses['dist'],name='dist')
 
             def mk_metric(basename,weights):
                 total_weights = tf.reduce_sum(weights)
@@ -8074,31 +8100,31 @@ with tf.name_scope('output'):
                 mk_threshold(3000)
             make_summaries(mk_metric)
 
-        # position confidence
-        with tf.name_scope('confidence'):
-            layerindex=0
-            gps_layer=gps
-            gps_layer_size=2
-            for layersize in [4,4,4,4]:
-                with tf.name_scope('full%d'%layerindex):
-                    w = tf.Variable(var_init([gps_layer_size,layersize],1.0/math.sqrt(float(layersize))))
-                    b = tf.Variable(tf.constant(0.1,shape=[layersize]))
-                    h = tf.nn.relu(tf.matmul(gps_layer,w)+b)
-                    gps_layer=tf.nn.dropout(h,args.dropout)
-                    gps_layer_size=layersize
-                layerindex+=1
-
-            with tf.name_scope('confidence_layer'):
-                confidence_input=tf.concat([final_layer,gps_layer],axis=1)
-                w = tf.Variable(var_init([final_layer_size+gps_layer_size,1],1.0/math.sqrt(float(final_layer_size+gps_layer_size))))
-                b = tf.Variable(tf.constant(3000.0,shape=[1]))
-                op_dist_guess = tf.matmul(confidence_input,w)+b
-
-            #guess_error = tf.reduce_mean((op_dist-op_dist_guess)**2)
-            guess_error = tf.reduce_mean(tf.abs(op_dist-op_dist_guess))
-            op_losses['dist_guess_error'] = guess_error
-            op_metrics['optimization/dist_guess']=tf.contrib.metrics.streaming_mean(op_dist_guess,name='dist_guess')
-            op_metrics['optimization/dist_guess_error']=tf.contrib.metrics.streaming_mean(guess_error,name='dist_guess_error')
+        # position stddev
+        #with tf.name_scope('stddev'):
+            #layerindex=0
+            #gps_layer=gps
+            #gps_layer_size=2
+            #for layersize in [4,4,4,4]:
+                #with tf.name_scope('full%d'%layerindex):
+                    #w = tf.Variable(var_init([gps_layer_size,args.gmm_components,layersize],1.0/math.sqrt(float(layersize))))
+                    #b = tf.Variable(tf.constant(0.1,shape=[args.gmm_components,layersize]))
+                    #h = tf.nn.relu(tf.tensordot(gps_layer,w,axes=[[2],[0]])+b)
+                    #gps_layer=tf.nn.dropout(h,args.dropout)
+                    #gps_layer_size=layersize
+                #layerindex+=1
+#
+            #gps_layer=tf.reduce_sum(mixture*gps,axis=1)
+            #stddev_input=tf.concat([final_layer,gps_layer],axis=1)
+            #w = tf.Variable(var_init([final_layer_size+gps_layer_size,1],1.0/math.sqrt(float(final_layer_size+gps_layer_size))))
+            #b = tf.Variable(tf.constant(3000.0,shape=[1]))
+            #op_dist_guess = tf.matmul(stddev_input,w)+b
+#
+            ##guess_error = tf.reduce_mean((op_dist-op_dist_guess)**2)
+            #guess_error = tf.reduce_mean(tf.abs(op_dist-op_dist_guess))
+            #op_losses['dist_guess_error'] = guess_error
+            #op_metrics['optimization/dist_guess']=tf.contrib.metrics.streaming_mean(op_dist_guess,name='dist_guess')
+            #op_metrics['optimization/dist_guess_error']=tf.contrib.metrics.streaming_mean(guess_error,name='dist_guess_error')
 
 # set loss function
 with tf.name_scope('loss'):
@@ -8125,7 +8151,7 @@ with tf.name_scope('loss'):
         op_loss = 0
         if 'dist' in op_losses:
             op_loss += op_losses['dist']/1000
-            op_loss += op_losses['dist_guess_error']/10000
+            #op_loss += op_losses['dist_guess_error']/10000
         if 'country_xentropy' in op_losses:
             op_loss += op_losses['country_xentropy']
         if 'loc_xentropy' in op_losses:
