@@ -7,8 +7,8 @@ import sys
 import datetime
 import time
 import gzip
-import geopy.distance
-import nltk.tokenize
+#import geopy.distance
+#import nltk.tokenize
 import numpy as np
 import scipy as sp
 import math
@@ -22,9 +22,9 @@ import collections
 class defaultdict(collections.defaultdict):
         __repr__ = dict.__repr__
 
-import treetaggerwrapper
-tagger=defaultdict(lambda: treetaggerwrapper.TreeTagger(TAGLANG='en'))
-tagger['es']=treetaggerwrapper.TreeTagger(TAGLANG='es')
+#import treetaggerwrapper
+#tagger=defaultdict(lambda: treetaggerwrapper.TreeTagger(TAGLANG='en'))
+#tagger['es']=treetaggerwrapper.TreeTagger(TAGLANG='es')
 
 ################################################################################
 # load the data
@@ -32,7 +32,10 @@ tagger['es']=treetaggerwrapper.TreeTagger(TAGLANG='es')
 files=(sys.argv[1:])
 #files=['/data/twitter/geoTwitter17-11-06/geoTwitter17-11-06_14:05']
 maxtweets=sys.maxint
-maxtweets=1000
+#maxtweets=1000
+
+userids=set([])
+newusers=0
 
 datas=[]
 numlines=0
@@ -75,6 +78,13 @@ for filename in files:
             ##print(nps)
             #newdata['words_ttw_lemmas']=hv.transform([' '.join(lemmas)])
             #newdata['words_ttw_nottags']=hv.transform([' '.join(nottags)])
+
+            # userids
+            if not newdata['userid'] in userids:
+                newusers+=1
+            userids.add(newdata['userid'])
+            if numlines%100==0:
+                print('numlines=',numlines,'; newusers=',float(newusers)/numlines)
 
             # add geometric features
             if data['geo']:

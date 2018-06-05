@@ -27,6 +27,8 @@ while True:
             'text' : data['text'],
             'lang' : data['lang'],
             'timestamp_ms' : data['timestamp_ms'],
+            'user' : { 'id' : data['user']['id'] },
+            'retweeted' : data['retweeted'],
         }
 
         try:

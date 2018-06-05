@@ -1,7 +1,7 @@
 #/bin/bash
 
-twitter_dir='/rhome/mizbicki/twitter2'
-output_dir='./data/twitter'
+twitter_dir='/rhome/mizbicki/twitter'
+output_dir='./data/twitter-new'
 
 mkdir -p $output_dir
 
