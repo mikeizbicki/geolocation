@@ -786,12 +786,12 @@ def json2dict(args,str):
 
     # get hashes
     batch_dict['lang_']=hash.lang2int(data['lang'])
-    if 'country' in args.output:
-        try:
-            country_code=hash.country2int(data['place']['country_code'])
-        except:
-            country_code=0
-        batch_dict['country_']=np.array([country_code])
+    #if 'country' in args.output:
+    try:
+        country_code=hash.country2int(data['place']['country_code'])
+    except:
+        country_code=0
+    batch_dict['country_']=np.array([country_code])
 
     # get inputs
     if 'bow' in args.input:
@@ -856,7 +856,6 @@ def mk_feed_dict(args,batch):
             batch_dict[k].append(data[k])
 
     feed_dict['lang_:0'] = np.vstack(batch_dict['lang_'])
-    feed_dict['country_:0'] = np.vstack(batch_dict['country_'])
     feed_dict['newuser_:0'] = np.vstack(batch_dict['newuser_'])
 
     if 'bow' in args.input:
@@ -877,6 +876,9 @@ def mk_feed_dict(args,batch):
 
     if 'time' in args.input:
         feed_dict['timestamp_ms_:0'] = np.vstack(batch_dict['timestamp_ms_'])
+
+    #if 'country' in args.output:
+    feed_dict['country_:0'] = np.vstack(batch_dict['country_'])
 
     if 'pos' in args.output:
         feed_dict['gps_:0'] = np.vstack(batch_dict['gps_'])
