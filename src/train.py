@@ -18,8 +18,6 @@ parser.add_argument('--log_dir',type=str,default='log')
 parser.add_argument('--log_name',type=str,default=None)
 parser.add_argument('--stepsave',type=int,default=10000)
 parser.add_argument('--seed',type=int,default=0)
-parser.add_argument('--name',type=str)
-parser.add_argument('--task',choices=['train','vis'],default='train')
 
 # debug variables
 parser.add_argument('--no_checkpoint',action='store_true')
@@ -40,9 +38,6 @@ args = parser.parse_args()
 
 if args.data_style=='online':
     args.max_open_files=1
-
-if args.task=='vis':
-    args.batchsize=1
 
 print('args=',args)
 
@@ -185,7 +180,6 @@ elif args.data_style == 'batch':
 
 ########################################
 print('looping through data')
-print('  task: ',args.task)
 
 stats_epoch={'count':0}
 def reset_stats_epoch():
@@ -196,6 +190,7 @@ def reset_stats_epoch():
     stats_epoch['err']=defaultdict(float)
     stats_epoch['start_time']=time.time()
     stats_epoch['decoding_time']=0
+    stats_epoch['run_time']=0
 reset_stats_epoch()
 stats_epoch_prev=stats_epoch
 
@@ -207,6 +202,7 @@ def reset_stats_step():
     stats_step['validtweets']=0
     stats_step['start_time']=time.time()
     stats_step['decoding_time']=0
+    stats_step['run_time']=0
     if not args.repeat_batch:
         stats_step['numlines']=0
 reset_stats_step()
@@ -289,93 +285,70 @@ while True:
     stats_step['decoding_time']+=decoding_time_stop-decoding_time_start
     stats_epoch['decoding_time']+=decoding_time_stop-decoding_time_start
 
-    ####################
-    if args.task=='vis':
-        [country_orig, gps_orig] = sess.run(
-            [country_softmax,gps]
-            , feed_dict=feed_dict
+    # run the model
+    run_time_start=time.time()
+    _, metrics = sess.run(
+        [ train_op, op_metrics ]
+        , feed_dict=feed_dict
+        )
+    run_time_stop=time.time()
+    stats_step['run_time']+=run_time_stop-run_time_start
+
+    # Write the summaries and print an overview fairly often.
+    if (stats_step['count'] < 10 or
+       (stats_step['count'] < 1000 and stats_step['count']%10 == 0) or
+       (stats_step['count'] < 10000 and stats_step['count']%100 == 0) or
+       (stats_step['count']%1000 == 0)):
+        output='  %8d/%4d: good=%1.2f  dec=%1.2f  run=%1.2f' % (
+              stats_step['count']
+            , stats_epoch['count']
+            , stats_step['validtweets']/float(stats_step['numlines'])
+            , stats_step['decoding_time']/float(time.time()-stats_step['start_time'])
+            , stats_step['run_time']/float(time.time()-stats_step['start_time'])
             )
-        print('data[text]=',data['text'])
-        print('data[lang]=',data['lang'])
-        print('data[place][country_code]=',data['place']['country_code'])
-        print('data[gps]=',feed_dict[gps_])
+        print(datetime.datetime.now(),output)
 
-        for i in range(0,len(data['text'])):
-            feed_dict_i=feed_dict
-            feed_dict_i[text_][0][i] = np.zeros([args.cnn_vocabsize])
-            [country_i,gps_i] = sess.run(
-                [country_softmax,gps]
-                , feed_dict=feed_dict_i
-                )
-            country_diff=np.linalg.norm(country_orig-country_i)
-            gps_diff=np.linalg.norm(gps_orig-gps_i)
-            print('%4d , %c : %e %e'%(i,data['text'][i],country_diff,gps_diff))
-        sys.exit(0)
+        # quit if we've gotten nan values
+        if math.isnan(stats_step['loss']):
+            raise ValueError('NaN loss')
 
-    ####################
-    if args.task=='train':
+        # save summaries if not debugging
+        if not args.no_checkpoint:
+            summary_str = sess.run(summary, feed_dict=feed_dict)
+            summary_writer.add_summary(summary_str, stats_step['count']*args.batchsize)
+            summary_writer.flush()
 
-        # run the model
-        _, metrics = sess.run(
-            [ train_op, op_metrics ]
-            , feed_dict=feed_dict
-            )
+        # save model if not debugging
+        if stats_step['count'] % args.stepsave == 0 and not args.no_checkpoint:
+            checkpoint_file = os.path.join(log_dir, 'model.ckpt')
+            saver.save(sess, checkpoint_file, global_step=stats_step['count'])
 
-        # Write the summaries and print an overview fairly often.
-        if (stats_step['count'] < 10 or
-           (stats_step['count'] < 100 and stats_step['count']%10 == 0) or
-           (stats_step['count'] < 10000 and stats_step['count']%100 == 0) or
-           (stats_step['count']%1000 == 0)):
-            output='  %8d/%4d: good=%1.2f  dec=%1.2f %s' % (
-                  stats_step['count']
-                , stats_epoch['count']
-                , stats_step['validtweets']/float(stats_step['numlines'])
-                , stats_step['decoding_time']/float(time.time()-stats_step['start_time'])
-                , '' #str(metrics)
-                )
-            print(datetime.datetime.now(),output)
+        # reset step variables and update epoch counters
+        for k,(v,_) in metrics.iteritems():
+            stats_epoch['err'][k]+=metrics[k][0]
+        reset_stats_step()
+        sess.run(reset_local_vars)
 
-            # quit if we've gotten nan values
-            if math.isnan(stats_step['loss']):
-                raise ValueError('NaN loss')
+    if stats_epoch['new']:
+        err=''
+        for k,v in stats_epoch['err'].iteritems():
+            if k=='dist':
+                err='%s %s:%1.2E'%(err,k,v)
+            else:
+                err='%s %s:%1.4f'%(err,k,v)
 
-            # save summaries if not debugging
-            if not args.no_checkpoint:
-                summary_str = sess.run(summary, feed_dict=feed_dict)
-                summary_writer.add_summary(summary_str, stats_step['count']*args.batchsize)
-                summary_writer.flush()
+        print('--------------------------------------------------------------------------------')
+        print('epoch %d' % stats_epoch['count'])
+        print('  time:  %s ' % str(datetime.timedelta(seconds=time.time() - stats_epoch['start_time'])))
+        print('  steps: %d ' % stats_epoch['steps'])
+        print('  err:  %s' % err )
+        print('--------------------------------------------------------------------------------')
+        stats_epoch_prev=copy.deepcopy(stats_epoch)
 
-            # save model if not debugging
-            if stats_step['count'] % args.stepsave == 0 and not args.no_checkpoint:
-                checkpoint_file = os.path.join(log_dir, 'model.ckpt')
-                saver.save(sess, checkpoint_file, global_step=stats_step['count'])
+        # save model if not debugging
+        if not args.no_checkpoint:
+            checkpoint_file = os.path.join(log_dir, 'model.ckpt')
+            saver.save(sess, checkpoint_file, global_step=stats_step['count'])
 
-            # reset step variables and update epoch counters
-            for k,(v,_) in metrics.iteritems():
-                stats_epoch['err'][k]+=metrics[k][0]
-            reset_stats_step()
-            sess.run(reset_local_vars)
-
-        if stats_epoch['new']:
-            err=''
-            for k,v in stats_epoch['err'].iteritems():
-                if k=='dist':
-                    err='%s %s:%1.2E'%(err,k,v)
-                else:
-                    err='%s %s:%1.4f'%(err,k,v)
-
-            print('--------------------------------------------------------------------------------')
-            print('epoch %d' % stats_epoch['count'])
-            print('  time:  %s ' % str(datetime.timedelta(seconds=time.time() - stats_epoch['start_time'])))
-            print('  steps: %d ' % stats_epoch['steps'])
-            print('  err:  %s' % err )
-            print('--------------------------------------------------------------------------------')
-            stats_epoch_prev=copy.deepcopy(stats_epoch)
-
-            # save model if not debugging
-            if not args.no_checkpoint:
-                checkpoint_file = os.path.join(log_dir, 'model.ckpt')
-                saver.save(sess, checkpoint_file, global_step=stats_step['count'])
-
-            # reset epoch variables
-            reset_stats_epoch()
+        # reset epoch variables
+        reset_stats_epoch()

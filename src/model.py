@@ -569,61 +569,15 @@ def inference(args,input_tensors):
                     op_lon = tf.atan(response[:,:,1])*360/math.pi
                     gps = tf.stack([op_lat,op_lon],2)
 
-                # same as algm, but uses the bias outside of the atan embedding
-                #if 'aglm2' == args.pos_type:
-                    #w = tf.Variable(tf.zeros([pos_final_layer_size, 2]),name='w')
-                    #if args.pos_warmstart:
-                        #b0 = tf.Variable([34.052235],name='b0')
-                        #b1 = tf.Variable([-118.243683],name='b1')
-                    #else:
-                        #b0 = tf.Variable(tf.zeros([1]),name='b0')
-                        #b1 = tf.Variable(tf.zeros([1]),name='b1')
-                    #response = tf.matmul(pos_final_layer,w)
-                    #op_lat = tf.atan(response[:,0])*360/math.pi/2 + b0
-                    #op_lon = tf.atan(response[:,1])*360/math.pi   + b1
-                    #gps = tf.stack([op_lat,op_lon],1)
-
-                # mixture of aglm responses
-                #if 'aglm_mix' == args.pos_type:
-                    #w = tf.Variable(var_init([pos_final_layer_size,args.aglm_components],0.1),name='w')
-                    #b = tf.Variable(tf.constant(0.1,shape=[args.aglm_components]),name='b')
-                    #mixture = tf.nn.softmax(tf.matmul(pos_final_layer,w)+b)
-#
-                    #with tf.name_scope('summaries'):
-                        #vals,_=tf.nn.top_k(mixture,k=args.aglm_components)
-                        #tf.summary.scalar('mixture_top0', tf.reduce_mean(vals[:,0]))
-                        #tf.summary.scalar('mixture_top1', tf.reduce_mean(vals[:,1]))
-                        #tf.summary.scalar('mixture_top2', tf.reduce_mean(vals[:,2]))
-                        #tf.summary.scalar('mixture_75', tf.reduce_mean(vals[:,1*args.aglm_components/4]))
-                        #tf.summary.scalar('mixture_50', tf.reduce_mean(vals[:,2*args.aglm_components/4]))
-                        #tf.summary.scalar('mixture_25', tf.reduce_mean(vals[:,3*args.aglm_components/4]))
-                        #tf.summary.scalar('mixture_0', tf.reduce_mean(vals[:,args.aglm_components-1]))
-#
-                    #w = tf.Variable(var_init([pos_final_layer_size,args.aglm_components,2],0.1),name='w')
-                    #if args.pos_warmstart:
-                        #b0 = [ [ math.tan(city['lat']/360*math.pi*2),
-                                 #math.tan(city['lon']/360*math.pi)
-                               #]
-                               #for city in city_loc.city_locs[:args.aglm_components]
-                             #]
-                    #else:
-                        #b0 = 0.1
-                    #b = tf.Variable(tf.constant(0.1,shape=[args.aglm_components, 2]),name='b')
-                    #responses = tf.tensordot(pos_final_layer,w,axes=[[1],[0]])
-#
-                    #reshaped=tf.reshape(mixture,shape=[args.batchsize,args.aglm_components,1])
-                    #tiled=tf.tile(reshaped,[1,1,2])
-                    #response=tf.reduce_sum(responses*tiled,axis=1)
-#
-                    #op_lat = tf.atan(response[:,0])*360/2/math.pi
-                    #op_lon = tf.atan(response[:,1])*360/math.pi
-                    #gps = tf.stack([op_lat,op_lon],1)
-
                 w = tf.Variable(var_init([pos_final_layer_size,args.gmm_components],0.1),name='w')
                 b = tf.Variable(tf.constant(0.1,shape=[args.gmm_components]),name='b')
-                mixture = tf.nn.softmax(tf.matmul(pos_final_layer,w)+b)
+                mixture_logits = tf.matmul(pos_final_layer,w)+b
+                mixture = tf.nn.softmax(mixture_logits)
+                print('mixture=',mixture)
+                print('mixture_logits=',mixture_logits)
 
                 with tf.name_scope('summaries'):
+                    tf.summary.scalar('mixture_sum', tf.reduce_mean(tf.reduce_sum(mixture,axis=1),axis=0))
                     vals,indices=tf.nn.top_k(mixture,k=args.gmm_components)
                     tf.summary.scalar('mixture_top0', tf.reduce_mean(vals[:,0]))
                     try:
@@ -653,7 +607,8 @@ def inference(args,input_tensors):
 
                 # radius of earth = 3959 miles, 6371 kilometers
                 op_dists = 2*6371*tf.asin(tf.sqrt(tf.maximum(epsilon,squared_angular_dist)))
-                op_dist = tf.reduce_sum(mixture*op_dists,axis=1)
+                op_dist_mixed = tf.reduce_sum(mixture*op_dists,axis=1)
+                op_dist_unmixed = tf.reduce_mean(op_dists,axis=1)
 
                 # set loss function
                 if args.pos_loss=='l2':
@@ -673,18 +628,19 @@ def inference(args,input_tensors):
                 if args.pos_loss=='angular':
                     op_loss = squared_angular_dist
 
-                op_losses['dist']=tf.reduce_mean(tf.reduce_sum(mixture*op_loss,axis=1))
-                op_metrics['optimization/pos_loss']=tf.contrib.metrics.streaming_mean(op_losses['dist'],name='dist')
+                op_losses['pos_loss']=tf.reduce_mean(tf.reduce_sum(mixture*op_loss,axis=1))
+                op_metrics['optimization/pos_loss']=tf.contrib.metrics.streaming_mean(op_dist_mixed,name='dist')
+                op_metrics['optimization/pos_loss_unmixed']=tf.contrib.metrics.streaming_mean(op_dist_unmixed,name='dist')
 
                 def mk_metric(basename,weights):
                     total_weights = tf.reduce_sum(weights)
                     op_dist_ave = tf.cond(total_weights>0,
-                        lambda: tf.reduce_sum(weights*op_dist)/total_weights,
+                        lambda: tf.reduce_sum(weights*op_dist_mixed)/total_weights,
                         lambda: 0.0
                         )
                     op_metrics[basename+'dist']=tf.contrib.metrics.streaming_mean(op_dist_ave,weights=total_weights,name='dist')
                     def mk_threshold(threshold):
-                        op_threshold = tf.sign(op_dist-threshold)/2+0.5
+                        op_threshold = tf.sign(op_dist_mixed-threshold)/2+0.5
                         op_threshold_ave = tf.cond(total_weights>0,
                             lambda: tf.reduce_sum(weights*op_threshold)/total_weights,
                             lambda: 0.0
@@ -749,8 +705,8 @@ def inference(args,input_tensors):
 
         if args.loss_weights == 'manual':
             op_loss = 0
-            if 'dist' in op_losses:
-                op_loss += op_losses['dist']/1000
+            if 'pos_loss' in op_losses:
+                op_loss += op_losses['pos_loss']/1000
                 #op_loss += op_losses['dist_guess_error']/10000
             if 'country_xentropy' in op_losses:
                 op_loss += op_losses['country_xentropy']
@@ -759,8 +715,8 @@ def inference(args,input_tensors):
 
         if args.loss_weights == 'manual2':
             op_loss = 0
-            if 'dist' in op_losses:
-                op_loss += op_losses['dist']/100
+            if 'pos_loss' in op_losses:
+                op_loss += op_losses['pos_loss']/100
                 op_loss += op_losses['dist_guess_error']/1000
             if 'country_xentropy' in op_losses:
                 op_loss += op_losses['country_xentropy']
@@ -772,8 +728,8 @@ def inference(args,input_tensors):
 
         if args.loss_weights == 'manual3':
             op_loss = 1.0
-            if 'dist' in op_losses:
-                op_loss *= op_losses['dist']/1000
+            if 'pos_loss' in op_losses:
+                op_loss *= op_losses['pos_loss']/1000
                 #op_loss += op_losses['dist_guess_error']/10000
             if 'country_xentropy' in op_losses:
                 op_loss *= op_losses['country_xentropy']
