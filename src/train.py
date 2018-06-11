@@ -30,6 +30,7 @@ parser.add_argument('--data_sample',choices=['uniform','fancy'],default='uniform
 parser.add_argument('--data_style',choices=['online','batch'],default='batch')
 parser.add_argument('--max_open_files',type=int,default=96)
 parser.add_argument('--initial_weights',type=str,default=None)
+parser.add_argument('--multiepoch',action='store_true')
 
 import model
 model.update_parser(parser)
@@ -57,9 +58,6 @@ import time
 import numpy as np
 import scipy as sp
 
-import sklearn.feature_extraction.text
-hv=sklearn.feature_extraction.text.HashingVectorizer(n_features=2**args.bow_hashsize,norm=None)
-
 import random
 random.seed(args.seed)
 
@@ -78,7 +76,8 @@ input_tensors={
     'loc_' : tf.placeholder(tf.int64, [args.batchsize,1],name='loc_'),
     'timestamp_ms_' : tf.placeholder(tf.float32, [args.batchsize,1], name='timestamp_ms_'),
     'lang_' : tf.placeholder(tf.int32, [args.batchsize,1], 'lang_'),
-    'newuser_' : tf.placeholder(tf.float32, [args.batchsize,1],name='newuser_')
+    'newuser_' : tf.placeholder(tf.float32, [args.batchsize,1],name='newuser_'),
+    'hash_' : tf.sparse_placeholder(tf.float32,name='hash_'),
 }
 
 op_metrics,op_loss_regularized = model.inference(args,input_tensors)
@@ -140,13 +139,27 @@ if not args.no_checkpoint:
 reset_global_vars=tf.global_variables_initializer()
 reset_local_vars=tf.local_variables_initializer()
 
-if args.initial_weights:
-    saver.restore(sess,args.initial_weights)
-    print('model restored from ',args.initial_weights)
-
-sess.graph.finalize()
 sess.run(reset_global_vars)
 sess.run(reset_local_vars)
+
+if args.initial_weights:
+    # see https://stackoverflow.com/questions/41621071/restore-subset-of-variables-in-tensorflow
+    print('restoring model')
+    reader = tf.pywrap_tensorflow.NewCheckpointReader(args.initial_weights)
+    var_to_shape_map = reader.get_variable_to_shape_map()
+    var_dict={}
+    for k in sorted(var_to_shape_map):
+        try:
+            var_dict[k]=tf.get_default_graph().get_tensor_by_name(k+":0")
+        except:
+            pass
+    #print('  restored_vars=',var_dict)
+    loader = tf.train.Saver(var_dict)
+    loader.restore(sess, args.initial_weights)
+    #saver.restore(sess,args.initial_weights)
+    print('  model restored from ',args.initial_weights)
+
+sess.graph.finalize()
 
 ########################################
 print('allocate dataset files')
@@ -161,22 +174,22 @@ for path_date in os.listdir(args.data):
 files_all.sort()
 files_all=files_all[:3000]
 
-files_train=[]
-files_test=[]
-files_valid=[]
-
-file_count=2
-file_step=13
-if args.data_style == 'online':
-    files_train=files_all
-elif args.data_style == 'batch':
-    for file in files_all:
-        if file_count%file_step==0:
-            files_test.append(file)
-        elif file_count%file_step==1:
-            files_valid.append(file)
-        else:
-            files_train.append(file)
+#files_train=[]
+#files_test=[]
+#files_valid=[]
+#
+#file_count=2
+#file_step=13
+#if args.data_style == 'online':
+    #files_train=files_all
+#elif args.data_style == 'batch':
+    #for file in files_all:
+        #if file_count%file_step==0:
+            #files_test.append(file)
+        #elif file_count%file_step==1:
+            #files_valid.append(file)
+        #else:
+            #files_train.append(file)
 
 ########################################
 print('looping through data')
@@ -209,8 +222,11 @@ reset_stats_step()
 
 userids=set([])
 
-files_remaining=copy.deepcopy(files_train)
+files_remaining=copy.deepcopy(files_all)
 open_files=[]
+
+random.seed(args.seed)
+np.random.seed(args.seed)
 
 while True:
     stats_step['count']+=1
@@ -245,7 +261,7 @@ while True:
                 print('  opening [%s]; files remaining: %d/%d; buffer state: %d/%d'%(
                     filename,
                     len(files_remaining),
-                    len(files_train),
+                    len(files_all),
                     len(open_files),
                     args.max_open_files,
                     ))
@@ -257,7 +273,7 @@ while True:
                 else:
                     stats_epoch['new']=True
                     stats_epoch['count']+=1
-                    files_remaining=copy.deepcopy(files_train)
+                    files_remaining=copy.deepcopy(files_all)
                     continue
 
             index=random.randrange(len(open_files))
@@ -270,15 +286,16 @@ while True:
                 open_files.pop(index)
                 continue
 
-            try:
+            #try:
+            if True:
                 stats_step['numlines']+=1
                 data=model.json2dict(args,nextline)
                 batch.append(data)
                 stats_step['validtweets']+=1
-            except Exception as e:
-                print('current file=',open_files[index].name)
-                print(e)
-                continue
+            #except Exception as e:
+                #print('current file=',open_files[index].name)
+                #print(e)
+                #continue
 
     feed_dict=model.mk_feed_dict(args,batch)
     decoding_time_stop=time.time()
@@ -299,12 +316,14 @@ while True:
        (stats_step['count'] < 1000 and stats_step['count']%10 == 0) or
        (stats_step['count'] < 10000 and stats_step['count']%100 == 0) or
        (stats_step['count']%1000 == 0)):
-        output='  %8d/%4d: good=%1.2f  dec=%1.2f  run=%1.2f' % (
+        output='  %8d/%4d: good=%1.2f  dec=%1.2f  run=%1.2f  locs=%d/%d' % (
               stats_step['count']
             , stats_epoch['count']
             , stats_step['validtweets']/float(stats_step['numlines'])
             , stats_step['decoding_time']/float(time.time()-stats_step['start_time'])
             , stats_step['run_time']/float(time.time()-stats_step['start_time'])
+            , hash.loc_count
+            , hash.loc_max
             )
         print(datetime.datetime.now(),output)
 
@@ -352,3 +371,7 @@ while True:
 
         # reset epoch variables
         reset_stats_epoch()
+
+        # exit if needed
+        if not args.multiepoch:
+            sys.exit(0)
