@@ -7323,3 +7323,17 @@ city_locs=[
     {'lat':70.73329104, 'lon':136.2166361},
     ]
 
+def get_cities(n,seed=0):
+
+    if n<=0:
+        return []
+
+    import random
+    random.seed(seed)
+
+    city_locs_ret=[ { 'lat' : city['lat']+random.normalvariate(0.0,1.0)
+                    , 'lon' : city['lon']+random.normalvariate(0.0,1.0)
+                    }
+                    for city in city_locs
+                    ]
+    return city_locs_ret[:n]+get_cities(n-len(city_locs),seed=seed+1)

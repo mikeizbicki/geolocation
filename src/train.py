@@ -80,7 +80,7 @@ input_tensors={
     'hash_' : tf.sparse_placeholder(tf.float32,name='hash_'),
 }
 
-op_metrics,op_loss_regularized = model.inference(args,input_tensors)
+op_metrics,op_loss_regularized,op_outputs = model.inference(args,input_tensors)
 
 # optimization nodes
 with tf.name_scope('optimization'):
@@ -104,11 +104,13 @@ with tf.name_scope('optimization'):
 ########################################
 print('preparing logging')
 if args.log_name is None:
-    args.log_name='data=%s,style=%s,input=%s,output=%s,loss_weights=%s,loss=%s,full=%s,learningrate=%1.1E,l1=%1.1E,l2=%1.1E,dropout=%1.1f,bow_hashsize=%d,loc_hashsize=%s,batchsize=%d'%(
+    args.log_name='data=%s,style=%s,input=%s,output=%s,pos_type=%s,gmm_components=%d,loss_weights=%s,loss=%s,full=%s,learningrate=%1.1E,l1=%1.1E,l2=%1.1E,dropout=%1.1f,batchsize=%d'%(
         os.path.basename(args.data),
         args.data_style,
         args.input,
         args.output,
+        args.pos_type,
+        args.gmm_components,
         args.loss_weights,
         args.pos_loss,
         str(args.full),
@@ -116,14 +118,20 @@ if args.log_name is None:
         args.l1,
         args.l2,
         args.dropout,
-        args.bow_hashsize,
-        str(args.loc_hashsize),
+        #args.bow_hashsize,
+        #str(args.loc_hashsize),
         args.batchsize
         )
 log_dir=os.path.join(args.log_dir,args.log_name)
 if not args.no_checkpoint:
     tf.gfile.MakeDirs(log_dir)
 print('log_dir=',log_dir)
+
+# save args
+import simplejson as json
+args_str=json.dumps(vars(args))
+with open(log_dir+'/args.json','w') as f:
+    f.write(args_str)
 
 # create tf session
 config = tf.ConfigProto(allow_soft_placement = True)

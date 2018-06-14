@@ -33,25 +33,29 @@ def update_parser(parser):
     parser.add_argument('--full',type=int,nargs='*',default=[])
 
     parser.add_argument('--output',choices=['pos','country','loc'],default=['pos','country','loc'],nargs='*')
-    parser.add_argument('--loss_weights',choices=['auto','ave','manual','manual2','manual3','prod'],default='manual')
+    parser.add_argument('--loss_weights',choices=['auto','ave','manual','manual2','manual3','prod'],default='ave')
     parser.add_argument('--loss_staircase',action='store_true')
     parser.add_argument('--pos_type',choices=['naive','aglm','aglm_mix'],default='aglm')
     parser.add_argument('--pos_loss',choices=['l2','chord','dist','dist_sqrt','dist2','angular'],default='dist')
-    parser.add_argument('--pos_shortcut',choices=['loc','country'],default=[],nargs='*')
+    parser.add_argument('--pos_shortcut',choices=['lang','loc','country'],default=[],nargs='*')
     parser.add_argument('--pos_warmstart',type=bool,default=True)
-    parser.add_argument('--gmm_type',choices=['simple','complex'],default='complex')
+    parser.add_argument('--gmm_type',choices=['verysimple','simple','complex'],default='complex')
     parser.add_argument('--gmm_notrain',action='store_true')
     parser.add_argument('--gmm_components',type=int,default=1)
+    parser.add_argument('--gmm_kappa0',type=float,default=0.0)
+    parser.add_argument('--gmm_maxprob',type=float,default=None)
+    parser.add_argument('--gmm_distloss',action='store_true')
     parser.add_argument('--country_shortcut',choices=['bow','lang'],default=[],nargs='*')
     parser.add_argument('--loc_type',choices=['popular','hash'],default='hash')
     parser.add_argument('--loc_filter',action='store_true')
     parser.add_argument('--loc_hashsize',type=int,default=16)
-    parser.add_argument('--loc_bottleneck',type=int,default=256)
+    parser.add_argument('--loc_bottleneck',type=int,default=None)
     parser.add_argument('--loc_shortcut',choices=['bow','lang','country'],default=[],nargs='*')
+    parser.add_argument('--enable_shortcuts',action='store_true')
 
     parser.add_argument('--predict_lang',action='store_true')
     parser.add_argument('--predict_lang_use',action='store_true')
-    parser.add_argument('--predict_lang_layers',type=int,default=[64,64],nargs='*')
+    parser.add_argument('--predict_lang_layers',type=int,default=[1024,1024],nargs='*')
 
     parser.add_argument('--minimal_summary',action='store_true')
 
@@ -61,6 +65,13 @@ def inference(args,input_tensors):
     import tensorflow as tf
     op_losses={}
     op_metrics={}
+    op_outputs={}
+
+    # preprocess args
+    if args.enable_shortcuts:
+        args.pos_shortcut=['lang','loc','country']
+        args.country_shortcut=['bow','lang']
+        args.loc_shortcut=['bow','lang','country']
 
     # helper for initializing variables consistently
     def var_init(shape,stddev=None):
@@ -82,38 +93,40 @@ def inference(args,input_tensors):
             make_summaries_without_newuser(mk_summary2)
 
     def make_summaries_without_newuser(mk_summary):
-        if not args.minimal_summary:
-            summary_langs=['en','ja','es','ar','fr','ko','zh','pt','tr','tl','in','und']
-            #summary_langs=hash.langs
-            for lang in summary_langs:
-                weights = tf.cast(tf.equal(input_tensors['lang_'],hash.lang2int(lang)),tf.float32)
+        with tf.name_scope('mk_summaries'):
+            if not args.minimal_summary:
+                summary_langs=['en','ja','es','ar','fr','ko','zh','pt','tr','tl','in','und']
+                #summary_langs=hash.langs
+                for lang in summary_langs:
+                    weights = tf.cast(tf.equal(input_tensors['lang_'],hash.lang2int(lang)),tf.float32)
+                    weights = tf.reshape(weights,[args.batchsize])
+                    mk_summary('filter_'+lang+'/',weights)
+
+                summary_countries=['US','MX','ES','FR','JP']
+                #summary_countries=hash.country_codes
+                for country in summary_countries:
+                    weights = tf.cast(tf.equal(input_tensors['country_'],hash.country2int(country)),tf.float32)
+                    weights = tf.reshape(weights,[args.batchsize])
+                    mk_summary('filter_'+country+'/',weights)
+
+                weights = tf.cast(tf.not_equal(input_tensors['lang_'],hash.lang2int('en')),tf.float32)
                 weights = tf.reshape(weights,[args.batchsize])
-                mk_summary('filter_'+lang+'/',weights)
+                mk_summary('all_minus_en/',weights)
 
-            summary_countries=['US','MX','ES','FR','JP']
-            #summary_countries=hash.country_codes
-            for country in summary_countries:
-                weights = tf.cast(tf.equal(input_tensors['country_'],hash.country2int(country)),tf.float32)
+                weights = tf.cast(tf.not_equal(input_tensors['country_'],hash.country2int('US')),tf.float32)
                 weights = tf.reshape(weights,[args.batchsize])
-                mk_summary('filter_'+country+'/',weights)
+                mk_summary('all_minus_us/',weights)
 
-            weights = tf.cast(tf.not_equal(input_tensors['lang_'],hash.lang2int('en')),tf.float32)
+            weights = tf.ones(input_tensors['lang_'].get_shape())
             weights = tf.reshape(weights,[args.batchsize])
-            mk_summary('all_minus_en/',weights)
-
-            weights = tf.cast(tf.not_equal(input_tensors['country_'],hash.country2int('US')),tf.float32)
-            weights = tf.reshape(weights,[args.batchsize])
-            mk_summary('all_minus_us/',weights)
-
-        weights = tf.ones(input_tensors['lang_'].get_shape())
-        weights = tf.reshape(weights,[args.batchsize])
-        mk_summary('all/',weights)
+            mk_summary('all/',weights)
 
     # summarize newusers
-    newuser_vec = tf.reshape(input_tensors['newuser_'],[args.batchsize])
-    def mk_newuser_summary(basename,weights):
-        tf.summary.scalar(basename+'newuser', tf.reduce_mean(weights*input_tensors['newuser_']))
-    make_summaries_without_newuser(mk_newuser_summary)
+    with tf.name_scope('newusers'):
+        newuser_vec = tf.reshape(input_tensors['newuser_'],[args.batchsize])
+        def mk_newuser_summary(basename,weights):
+            tf.summary.scalar(basename+'newuser', tf.reduce_mean(weights*input_tensors['newuser_']))
+        make_summaries_without_newuser(mk_newuser_summary)
 
     # helper for making xentropy layers with appropriate summaries
     def mk_xentropy_layer(valname,val_,logits):
@@ -383,12 +396,12 @@ def inference(args,input_tensors):
                     logits = tf.matmul(final_layer,w)+b
                     lang_softmax=tf.nn.softmax(logits)
                     mk_xentropy_layer('lang',input_tensors['lang_'],logits)
+                    op_outputs['lang_softmax']=lang_softmax
 
             # the lang layer
             with tf.name_scope('lang'):
                 if args.predict_lang_use:
                     lang_one_hot=lang_softmax
-                    #lang_one_hot = tf.reshape(tf.one_hot(lang,len(hash.langs),axis=1),shape=[args.batchsize,len(hash.langs)])
                 else:
                     lang_one_hot = tf.reshape(tf.one_hot(input_tensors['lang_'],len(hash.langs),axis=1),shape=[args.batchsize,len(hash.langs)])
 
@@ -397,8 +410,6 @@ def inference(args,input_tensors):
         # time inputs
         if 'time' in args.input:
             with tf.name_scope('time'):
-
-                #timestamp_ms_ = tf.placeholder(tf.float32, [args.batchsize,1], name='timestamp_ms_')
 
                 def wrapped(var,length):
                     scaled=var/length*2*math.pi
@@ -433,24 +444,21 @@ def inference(args,input_tensors):
                 final_layer_country_size = final_layer_size
 
                 if 'lang' in args.country_shortcut:
-                    try:
+                    if 'lang' in args.input:
                         final_layer_country = tf.concat([final_layer_country,lang_one_hot],axis=1)
-                        final_layer_country_size += len(langs)
-                    except:
-                        pass
+                        final_layer_country_size += int(lang_one_hot.get_shape()[1])
 
-                if 'bow' in args.pos_shortcut:
-                    try:
+                if 'bow' in args.country_shortcut:
+                    if 'bow' in args.output:
                         final_layer_country = tf.concat([final_layer_country,bow],axis=1)
                         final_layer_country_size += args.bow_layersize
-                    except:
-                        pass
 
                 # layer
                 w = tf.Variable(tf.zeros([final_layer_country_size,len(hash.country_codes)]),name='w')
                 b = tf.Variable(tf.zeros([len(hash.country_codes)]),name='b')
                 logits = tf.matmul(final_layer_country,w)+b
                 country_softmax=tf.nn.softmax(logits)
+                op_outputs['country_softmax']=country_softmax
 
                 mk_xentropy_layer('country',input_tensors['country_'],logits)
 
@@ -463,38 +471,41 @@ def inference(args,input_tensors):
 
             with tf.name_scope('loc'):
                 # shortcuts
-                final_layer_pos = final_layer
-                final_layer_pos_size = final_layer_size
+                final_layer_loc = final_layer
+                final_layer_loc_size = final_layer_size
 
-                if 'lang' in args.country_shortcut:
-                    final_layer_pos = tf.concat([final_layer_pos,lang_one_hot],axis=1)
-                    final_layer_pos_size += len(langs)
+                if 'lang' in args.loc_shortcut:
+                    if 'lang' in args.input:
+                        final_layer_loc = tf.concat([final_layer_loc,lang_one_hot],axis=1)
+                        final_layer_loc_size += int(lang_one_hot.get_shape()[1])
 
-                if 'bow' in args.pos_shortcut:
-                    final_layer_pos = tf.concat([final_layer_pos,bow],axis=1)
-                    final_layer_pos_size += args.bow_layersize
+                if 'bow' in args.loc_shortcut:
+                    if 'bow' in args.output:
+                        final_layer_loc = tf.concat([final_layer_loc,bow],axis=1)
+                        final_layer_loc_size += args.bow_layersize
 
-                if 'country' in args.pos_shortcut:
-                    final_layer_pos = tf.concat([final_layer_pos,country_softmax],axis=1)
-                    final_layer_pos_size += len(country_codes)
+                if 'country' in args.loc_shortcut:
+                    if 'country' in args.output:
+                        final_layer_loc = tf.concat([final_layer_loc,country_softmax],axis=1)
+                        final_layer_loc_size += int(country_softmax.get_shape()[1])
 
                 # layer
                 if args.loc_bottleneck:
-                    w0 = tf.Variable(tf.zeros([final_layer_pos_size, args.loc_bottleneck]),name='w0')
+                    w0 = tf.Variable(tf.zeros([final_layer_loc_size, args.loc_bottleneck]),name='w0')
                     w1 = tf.Variable(tf.zeros([args.loc_bottleneck, hash.loc_max]),name='w1')
                     b1 = tf.Variable(tf.zeros([hash.loc_max]),name='b1')
-                    logits = tf.matmul(final_layer_pos,tf.matmul(w0,w1))+b1
+                    logits = tf.matmul(final_layer_loc,tf.matmul(w0,w1))+b1
                 else:
-                    w1 = tf.Variable(tf.zeros([final_layer_pos_size, hash.loc_max]),name='w1')
+                    w1 = tf.Variable(tf.zeros([final_layer_loc_size, hash.loc_max]),name='w1')
                     b1 = tf.Variable(tf.zeros([hash.loc_max]),name='b1')
-                    logits = tf.matmul(final_layer_pos,w1)+b1
+                    logits = tf.matmul(final_layer_loc,w1)+b1
 
                 loc_softmax=tf.nn.softmax(logits)
+                op_outputs['loc_softmax']=loc_softmax
                 mk_xentropy_layer('loc',loc_,logits)
 
         # position based losses
         if 'pos' in args.output:
-            #gps_ = tf.placeholder(tf.float32, [args.batchsize,2], name='gps_')
             gps_=input_tensors['gps_']
 
             with tf.name_scope('pos'):
@@ -503,19 +514,25 @@ def inference(args,input_tensors):
                 pos_final_layer = final_layer
                 pos_final_layer_size = final_layer_size
 
+                if 'lang' in args.country_shortcut:
+                    if 'lang' in args.input:
+                        pos_final_layer = tf.concat([pos_final_layer,lang_one_hot],axis=1)
+                        pos_final_layer_size += int(lang_one_hot.get_shape()[1])
+
+                if 'bow' in args.country_shortcut:
+                    if 'bow' in args.output:
+                        pos_final_layer = tf.concat([pos_final_layer,bow],axis=1)
+                        pos_final_layer_size += args.bow_layersize
+
                 if 'loc' in args.pos_shortcut:
-                    try:
+                    if 'loc' in args.output:
                         pos_final_layer = tf.concat([pos_final_layer,loc_softmax],axis=1)
                         pos_final_layer_size += hash.loc_max
-                    except:
-                        pass
 
                 if 'country' in args.pos_shortcut:
-                    try:
+                    if 'country' in args.output:
                         pos_final_layer = tf.concat([pos_final_layer,country_softmax],axis=1)
-                        pos_final_layer_size += len(country_codes)
-                    except:
-                        pass
+                        pos_final_layer_size += int(country_softmax.get_shape()[1])
 
                 # decompose true labels
                 with tf.name_scope('reshape'):
@@ -541,7 +558,7 @@ def inference(args,input_tensors):
                 if 'aglm' == args.pos_type:
                     w = tf.Variable(tf.zeros([pos_final_layer_size, 2]),name='w')
                     if args.pos_warmstart:
-                        b = tf.Variable([34.052235,-118.243683],name='b')
+                        b = tf.Variable([0.6745,-2],name='b')
                     else:
                         b = tf.Variable(tf.zeros([2]),name='b')
                     response = tf.matmul(pos_final_layer,w) + b
@@ -549,96 +566,151 @@ def inference(args,input_tensors):
                     op_lon = tf.atan(response[:,1])*360/math.pi
                     gps = tf.stack([op_lat,op_lon],1)
 
+                # Mixture of fisher distributions
+                # see "directional statistics" by Mardia and Jupp for Fisher distribution
                 if 'aglm_mix' == args.pos_type:
                     if args.pos_warmstart:
-                        mu0 = [ [ math.tan(city['lat']/360*math.pi*2),
+                        mu0 = [ [ math.tan(city['lat']/360*2*math.pi),
                                  math.tan(city['lon']/360*math.pi)
                                ]
-                               for city in city_loc.city_locs[:args.gmm_components]
+                               for city in city_loc.get_cities(args.gmm_components)
                              ]
                     else:
                         mu0 = 0.1
-
                     pre_mu_constant = tf.constant(mu0,shape=[args.gmm_components,2])
-                    pre_mu = tf.Variable(pre_mu_constant,name='pre_mu')
-                    mu = tf.stack([ tf.cos(pre_mu[:,0])
-                                  , tf.sin(pre_mu[:,0]) * tf.cos(pre_mu[:,1])
-                                  , tf.sin(pre_mu[:,0]) * tf.sin(pre_mu[:,1])
-                                  ])
+                    pre_kappa_constant = tf.constant(args.gmm_kappa0,shape=[args.gmm_components])
 
+                    if args.gmm_type=='simple' or args.gmm_type=='verysimple':
+                        trainable=args.gmm_type!='verysimple'
+                        pre_mu = tf.Variable(pre_mu_constant,name='pre_mu',trainable=trainable)
+                        mu = tf.reshape( tf.stack([ tf.cos(pre_mu[:,0])
+                                                  , tf.sin(pre_mu[:,0]) * tf.cos(pre_mu[:,1])
+                                                  , tf.sin(pre_mu[:,0]) * tf.sin(pre_mu[:,1])
+                                                  ]),
+                                         [3,1,args.gmm_components])
+                        pre_kappa = tf.Variable(pre_kappa_constant,name='pre_kappa')
+                        kappa = tf.reshape( tf.exp(pre_kappa), [1,args.gmm_components])
+
+                    else:
+                        with tf.name_scope('pre_mu'):
+                            w = tf.Variable(var_init([pos_final_layer_size,args.gmm_components,2],0.1),name='w')
+                            b = tf.Variable(pre_mu_constant,name='b')
+                            pre_mu = tf.tensordot(pos_final_layer,w,axes=[1,0])+b
+                        mu = tf.stack([ tf.cos(pre_mu[:,:,0])
+                                      , tf.sin(pre_mu[:,:,0]) * tf.cos(pre_mu[:,:,1])
+                                      , tf.sin(pre_mu[:,:,0]) * tf.sin(pre_mu[:,:,1])
+                                      ])
+
+                        pre_kappa = tf.Variable(pre_kappa_constant,name='pre_kappa')
+                        kappa = tf.exp(pre_kappa)
+
+                        # FIXME: making kappa depend on pos_final_layer intoduces a degenerate dependency on mu which prevents optimization
+                        #with tf.name_scope('pre_kappa'):
+                            #w = tf.Variable(var_init([pos_final_layer_size,args.gmm_components],0.1),name='w')
+                            #b = tf.Variable(pre_kappa_constant,name='b')
+                            #pre_kappa = tf.tensordot(pos_final_layer,w,axes=[1,0])+b
+                        #kappa = tf.exp(pre_kappa)
+
+                    pre_mu_lat = tf.atan(pre_mu[:,0])*360/2/math.pi
+                    pre_mu_lon = tf.atan(pre_mu[:,1])*360/math.pi
+                    pre_mu_gps = tf.stack([pre_mu_lat,pre_mu_lon],axis=1)
 
                     x = tf.stack([ tf.cos(op_lat_rad_)
                                  , tf.sin(op_lat_rad_) * tf.cos(op_lon_rad_)
                                  , tf.sin(op_lat_rad_) * tf.sin(op_lon_rad_)
                                  ])
-
-                    pre_kappa_constant = tf.constant(1.0,shape=[args.gmm_components])
-                    pre_kappa = tf.Variable(pre_kappa_constant,name='pre_kappa')
-                    kappa = tf.exp(pre_kappa)
+                    x_reshape = tf.reshape(x,[3,args.batchsize,1])
 
                     w = tf.Variable(var_init([pos_final_layer_size,args.gmm_components],0.1),name='w')
                     b = tf.Variable(tf.constant(0.1,shape=[args.gmm_components]),name='b')
                     mixture_logits = tf.matmul(pos_final_layer,w)+b
-                    mixture = tf.nn.softmax(mixture_logits)
 
-                    with tf.name_scope('summaries'):
-                        tf.summary.scalar('mixture_sum', tf.reduce_mean(tf.reduce_sum(mixture,axis=1),axis=0))
-                        vals,indices=tf.nn.top_k(mixture,k=args.gmm_components)
-                        tf.summary.scalar('mixture_top0', tf.reduce_mean(vals[:,0]))
-                        try:
-                            tf.summary.scalar('mixture_top1', tf.reduce_mean(vals[:,1]))
-                        except:
-                            pass
-                        try:
-                            tf.summary.scalar('mixture_top2', tf.reduce_mean(vals[:,2]))
-                        except:
-                            pass
-                        tf.summary.scalar('mixture_75', tf.reduce_mean(vals[:,1*args.gmm_components/4]))
-                        tf.summary.scalar('mixture_50', tf.reduce_mean(vals[:,2*args.gmm_components/4]))
-                        tf.summary.scalar('mixture_25', tf.reduce_mean(vals[:,3*args.gmm_components/4]))
-                        tf.summary.scalar('mixture_0', tf.reduce_mean(vals[:,args.gmm_components-1]))
+                    if args.gmm_maxprob != None:
+                        gamma_low = 0.0
+                        mixture_logits = tf.minimum(
+                            tf.maximum(gamma_low,mixture_logits),
+                            math.log(args.gmm_maxprob)+math.log(args.gmm_components)+gamma_low
+                            )
 
-                    #print('mu=',mu)
-                    #print('x=',x)
-                    log_loss = - pre_kappa + tf.log(tf.sinh(kappa)) - kappa * tf.tensordot(x,mu,axes=[0,0])
-                    #print('log_loss=',log_loss)
-                    #print('mixture=',mixture)
+                    #mixture_logits_max = tf.reduce_max(mixture_logits,axis=1)
+                    mixture_prior = tf.constant(1.0,shape=mixture_logits.get_shape())
+                    mixture = tf.nn.softmax(mixture_logits+mixture_prior)
+                    #mixture1 = tf.nn.softmax(mixture_logits+mixture_prior)
+                    #mixture1_max = tf.reduce_max(mixture1,axis=1)
+                    #print('mixture1_max=',mixture1_max)
+                    #mixture1_max/log(a*sum(args.gmm_components+mixture1_max))=t
+                    #a=exp(x/t)/(sum(exp(x_i/t)))
+                    #a*sum(exp(x_i/t))=exp(x/t)
+                    #temperature = tf.reshape(tf.where(
+                        #mixture1_max <= args.gmm_maxprob,
+                        #tf.constant(1.0,shape=[args.batchsize]),
+                        #mixture_logits_max/tf.log(args.gmm_maxprob*(args.gmm_components+mixture_logits_max))
+                        ##tf.log(args.gmm_maxprob)/mixture1_max
+                        #),[args.batchsize,1])
+                    #print('mixture_logits=',mixture_logits)
+                    #print('temperature=',temperature)
+                    #mixture = tf.nn.softmax((mixture_logits+mixture_prior)/temperature)
+
+                    #log_loss = - pre_kappa + tf.log(tf.sinh(kappa)) - kappa * tf.tensordot(x,mu,axes=[0,0])
+                    log_loss = - pre_kappa + tf.log(tf.sinh(kappa)) - kappa * tf.reduce_sum(x_reshape*mu,axis=0)
                     mixed_log_loss=tf.reduce_sum(log_loss*mixture,axis=1)
-                    #print('mixed_log_loss=',mixed_log_loss)
 
                     loss=tf.reduce_mean(mixed_log_loss)
-                    op_losses['pos_loss']=loss
-                    op_metrics['optimization/aglm_mix']=tf.contrib.metrics.streaming_mean(loss,name='pos_loss')
-                    #raise ValueError('hi')
-                    #batch_response =
+                    op_losses['pos_loss_mix']=loss
+                    op_metrics['optimization/aglm_mix']=tf.contrib.metrics.streaming_mean(loss,name='aglm_mix')
 
-                    main_component=tf.nn.softmax(mixture,axis=1)
-                    print('main_component=',main_component)
-                    print('pre_mu=',pre_mu)
-                    op_gps_rad = tf.tensordot(main_component,pre_mu,axes=[1,0])
+                    with tf.name_scope('summaries'):
+                        vals,indices=tf.nn.top_k(mixture,k=args.gmm_components)
+                        mixture_sum=tf.reduce_mean(tf.reduce_sum(mixture,axis=1))
+                        op_metrics['mix/sum']=tf.contrib.metrics.streaming_mean(mixture_sum,name='mixture_sum')
+                        logits_max=tf.reduce_mean(tf.reduce_max(mixture_logits,axis=1))
+                        op_metrics['mix/logits_max']=tf.contrib.metrics.streaming_mean(logits_max,name='logits_max')
+                        logits_min=tf.reduce_mean(tf.reduce_min(mixture_logits,axis=1))
+                        op_metrics['mix/logits_min']=tf.contrib.metrics.streaming_mean(logits_min,name='logits_min')
+                        w_max=tf.reduce_max(w)
+                        op_metrics['mix/w_max']=tf.contrib.metrics.streaming_mean(logits_max,name='w_max')
+                        w_min=tf.reduce_min(w)
+                        op_metrics['mix/w_min']=tf.contrib.metrics.streaming_mean(logits_min,name='w_min')
+                        for k in [0,1,2]:
+                            topk=vals[:,min(k,args.gmm_components-1)]
+                            op_metrics['mix/top'+str(k)+'_loss']=tf.contrib.metrics.streaming_mean(topk,name='topk_'+str(k))
+                        for p in [0.0,0.25,0.50,0.75]:
+                            topp=vals[:,int((1.0-p)*args.gmm_components)-1]
+                            op_metrics['mix/percentile_'+str(p)]=tf.contrib.metrics.streaming_mean(topp,name='topp_'+str(p))
+
+                    #main_component=tf.nn.softmax(mixture) #,axis=1)
+                    main_component=mixture #,axis=1)
+                    main_component_reshape=tf.reshape(main_component,[args.batchsize,args.gmm_components,1])
+                    #main_component=tf.reshape(tf.argmax(logits,axis=1),shape=[args.batchsize,1,1])
+                    #main_component_reshape=tf.cast(tf.tile(main_component,[1,args.gmm_components,1]),dtype=tf.float32)
+
+                    op_gps_rad = tf.reduce_sum(main_component_reshape*pre_mu,axis=1)
+                    #op_gps_rad = tf.tensordot(main_component,pre_mu,axes=[1,0])
                     op_lat = tf.atan(op_gps_rad[:,0])*360/2/math.pi
                     op_lon = tf.atan(op_gps_rad[:,1])*360/math.pi
                     gps = tf.stack([op_lat,op_lon])
-                    print('gps=',gps)
-                    #raise ValueError('hi')
 
-                    #op_lat = tf.atan(response[:,0])*360/2/math.pi
-                    #op_lon = tf.atan(response[:,1])*360/math.pi
-                    #gps = tf.stack([op_lat,op_lon],2)
+                    op_outputs['aglm_mix/pre_mu']=pre_mu_gps
+                    op_outputs['aglm_mix/mu']=mu
+                    op_outputs['aglm_mix/pre_kappa']=pre_kappa
+                    op_outputs['aglm_mix/kappa']=kappa
+                    op_outputs['aglm_mix/mixture']=mixture
+                    op_outputs['aglm_mix/log_loss']=log_loss
+                op_outputs['gps']=gps
 
                 # common outputs
 
                 epsilon = 1e-6
 
                 op_lat_rad = op_lat/360*2*math.pi
-                op_lon_rad = op_lon/360*2*math.pi
+                op_lon_rad = op_lon/360*math.pi
 
                 hav = lambda x: tf.sin(x/2)**2
                 squared_angular_dist = ( hav(op_lat_rad-op_lat_rad_)
-                +tf.cos(op_lat_rad)*tf.cos(op_lat_rad_)*hav(op_lon_rad-op_lon_rad_)
-                )
+                    +tf.cos(op_lat_rad)*tf.cos(op_lat_rad_)*hav(op_lon_rad-op_lon_rad_)
+                    )
 
-# radius of earth = 3959 miles, 6371 kilometers
+                # radius of earth = 3959 miles, 6371 kilometers
                 op_dist = 2*6371*tf.asin(tf.sqrt(tf.maximum(epsilon,squared_angular_dist)))
                 op_dist_ave = tf.reduce_sum(op_dist)/args.batchsize
 
@@ -647,7 +719,7 @@ def inference(args,input_tensors):
                 op_delta_z = tf.sin(op_lat_rad) - tf.sin(op_lat_rad_)
                 op_chord = tf.sqrt(epsilon + op_delta_x**2 + op_delta_y**2 + op_delta_z**2)
 
-# set loss function
+                # set loss function
                 if args.pos_loss=='l2':
                     op_loss = tf.reduce_sum((gps - gps_) * (gps - gps_))
                 if args.pos_loss=='chord':
@@ -659,7 +731,8 @@ def inference(args,input_tensors):
                 if args.pos_loss=='angular':
                     op_loss = tf.reduce_sum(squared_angular_dist)
 
-                op_losses['dist']=op_loss
+                if not args.pos_type=='aglm_mix' or args.gmm_distloss:
+                    op_losses['pos_loss']=op_loss/1000
                 op_metrics['optimization/dist']=tf.contrib.metrics.streaming_mean(op_dist_ave,name='dist')
 
                 def mk_metric(basename,weights):
@@ -686,69 +759,6 @@ def inference(args,input_tensors):
                     mk_threshold(3000)
                 make_summaries(mk_metric)
 
-                if False:
-                    # common outputs
-
-                    epsilon = 1e-6
-
-                    op_lat_rad = op_lat/360*2*math.pi
-                    op_lon_rad = op_lon/360*math.pi
-                    #op_lon_rad = op_lon/360*2*math.pi
-
-                    hav = lambda x: tf.sin(x/2)**2
-                    squared_angular_dist = ( hav(op_lat_rad-op_lat_rad_)
-                                    +tf.cos(op_lat_rad)*tf.cos(op_lat_rad_)*hav(op_lon_rad-op_lon_rad_)
-                                   )
-
-                    # radius of earth = 3959 miles, 6371 kilometers
-                    op_dists = 2*6371*tf.asin(tf.sqrt(tf.maximum(epsilon,squared_angular_dist)))
-
-                    # set loss function
-                    if args.pos_loss=='l2':
-                        op_loss = tf.reduce_sum((gps - gps_) * (gps - gps_),axis=2)
-                    if args.pos_loss=='chord':
-                        op_delta_x = tf.cos(op_lat_rad)*tf.cos(op_lon_rad)-tf.cos(op_lat_rad_)*tf.cos(op_lon_rad_)
-                        op_delta_y = tf.cos(op_lat_rad)*tf.sin(op_lon_rad)-tf.cos(op_lat_rad_)*tf.sin(op_lon_rad_)
-                        op_delta_z = tf.sin(op_lat_rad) - tf.sin(op_lat_rad_)
-                        op_chord = tf.sqrt(epsilon + op_delta_x**2 + op_delta_y**2 + op_delta_z**2)
-                        op_loss = op_chord
-                    if args.pos_loss=='dist_sqrt':
-                        op_loss = tf.sqrt(op_dists)
-                    if args.pos_loss=='dist':
-                        op_loss = op_dists
-                    if args.pos_loss=='dist2':
-                        op_loss = op_dists*op_dists
-                    if args.pos_loss=='angular':
-                        op_loss = squared_angular_dist
-
-                    if not args.pos_type == 'aglm_mix':
-                        op_losses['pos_loss']=tf.reduce_mean(op_loss)
-                    op_metrics['optimization/pos_loss']=tf.contrib.metrics.streaming_mean(op_dists,name='dist')
-
-                    def mk_metric(basename,weights):
-                        total_weights = tf.reduce_sum(weights)
-                        op_dist_ave = tf.cond(total_weights>0,
-                            lambda: tf.reduce_sum(weights*op_dists)/total_weights,
-                            lambda: 0.0
-                            )
-                        op_metrics[basename+'dist']=tf.contrib.metrics.streaming_mean(op_dist_ave,weights=total_weights,name='dist')
-                        def mk_threshold(threshold):
-                            op_threshold = tf.sign(op_dists-threshold)/2+0.5
-                            op_threshold_ave = tf.cond(total_weights>0,
-                                lambda: tf.reduce_sum(weights*op_threshold)/total_weights,
-                                lambda: 0.0
-                                )
-                            name=basename+'k'+str(threshold)
-                            op_metrics[name]=tf.contrib.metrics.streaming_mean(op_threshold_ave,weights=total_weights,name=name)
-                        mk_threshold(10)
-                        mk_threshold(50)
-                        mk_threshold(100)
-                        mk_threshold(500)
-                        mk_threshold(1000)
-                        mk_threshold(2000)
-                        mk_threshold(3000)
-                    make_summaries(mk_metric)
-
     # set loss function
     with tf.name_scope('loss'):
         op_projections=[]
@@ -770,6 +780,9 @@ def inference(args,input_tensors):
                 i+=1
             op_loss += tf.linalg.norm(w0-w_max)**2
 
+        if args.loss_weights == 'ave':
+            op_loss = tf.reduce_mean(op_losses.values())
+
         if args.loss_weights == 'manual':
             op_loss = 0
             if 'pos_loss' in op_losses:
@@ -789,9 +802,6 @@ def inference(args,input_tensors):
                 op_loss += op_losses['country_xentropy']
             if 'loc_xentropy' in op_losses:
                 op_loss += op_losses['loc_xentropy']/10
-
-        if args.loss_weights == 'ave':
-            op_loss = tf.reduce_mean(op_losses.values())
 
         if args.loss_weights == 'manual3':
             op_loss = 1.0
@@ -820,7 +830,7 @@ def inference(args,input_tensors):
         op_loss_regularized=op_loss+tf.reduce_sum(regularizers)
         op_losses['optimization/op_loss_regularized']=op_loss_regularized
 
-        return op_metrics,op_loss_regularized
+        return op_metrics,op_loss_regularized,op_outputs
 
 ################################################################################
 
