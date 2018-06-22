@@ -8,15 +8,16 @@ tweetlen=280
 
 def update_parser(parser):
     parser.add_argument('--batchsize',type=int,default=100)
-    parser.add_argument('--learningrate',type=float,default=0.005)
+    parser.add_argument('--learningrate',type=float,default=5e-5)
     parser.add_argument('--optimizer',choices=['adam','sgd'],default='adam')
     parser.add_argument('--momentum',type=float,default=0.9)
     parser.add_argument('--decay',type=float,default=None)
-    parser.add_argument('--dropout',type=float,default=0.5)
+    parser.add_argument('--dropout',type=float,default=1)
     parser.add_argument('--l1',type=float,default=0.0)
     parser.add_argument('--l2',type=float,default=1e-5)
 
-    parser.add_argument('--input',choices=['cnn','bow','lang','time','const'],nargs='+',required=True)
+    parser.add_argument('--input',choices=['cnn','bow','lang','time','const'],nargs='+',default=['cnn','lang','time'])
+    parser.add_argument('--remove_urls',type=bool,default=True)
     parser.add_argument('--bow_hashsize',type=int,default=20)
     parser.add_argument('--bow_layersize',type=int,default=2)
     parser.add_argument('--bow_dense',action='store_true')
@@ -30,9 +31,9 @@ def update_parser(parser):
     parser.add_argument('--cltcc_numfilters',type=int,default=1024)
     parser.add_argument('--cltcc_variance',type=float,default=0.02)
 
-    parser.add_argument('--full',type=int,nargs='*',default=[])
+    parser.add_argument('--full',type=int,nargs='*',default=[2048,2048])
 
-    parser.add_argument('--output',choices=['pos','country','loc'],default=['pos','country','loc'],nargs='*')
+    parser.add_argument('--output',choices=['pos','country','loc'],default=['pos','country'],nargs='*')
     parser.add_argument('--loss_weights',choices=['auto','ave','manual','manual2','manual3','prod'],default='ave')
     parser.add_argument('--loss_staircase',action='store_true')
     parser.add_argument('--pos_type',choices=['naive','aglm','aglm_mix'],default='aglm')
@@ -40,9 +41,10 @@ def update_parser(parser):
     parser.add_argument('--pos_shortcut',choices=['lang','loc','country'],default=[],nargs='*')
     parser.add_argument('--pos_warmstart',type=bool,default=True)
     parser.add_argument('--gmm_type',choices=['verysimple','simple','complex'],default='complex')
+    parser.add_argument('--gmm_lrfactor',type=float,default=1e-2)
     parser.add_argument('--gmm_notrain',action='store_true')
     parser.add_argument('--gmm_components',type=int,default=1)
-    parser.add_argument('--gmm_kappa0',type=float,default=0.0)
+    parser.add_argument('--gmm_prekappa0',type=float,default=10.0)
     parser.add_argument('--gmm_maxprob',type=float,default=None)
     parser.add_argument('--gmm_distloss',action='store_true')
     parser.add_argument('--country_shortcut',choices=['bow','lang'],default=[],nargs='*')
@@ -53,11 +55,12 @@ def update_parser(parser):
     parser.add_argument('--loc_shortcut',choices=['bow','lang','country'],default=[],nargs='*')
     parser.add_argument('--enable_shortcuts',action='store_true')
 
-    parser.add_argument('--predict_lang',action='store_true')
+    parser.add_argument('--predict_lang',type=bool,default=True)
     parser.add_argument('--predict_lang_use',action='store_true')
     parser.add_argument('--predict_lang_layers',type=int,default=[1024,1024],nargs='*')
 
-    parser.add_argument('--minimal_summary',action='store_true')
+    parser.add_argument('--summary_size',choices=['small','med','all'],default='med')
+    parser.add_argument('--summary_newusers',action='store_true')
 
 ################################################################################
 
@@ -66,6 +69,7 @@ def inference(args,input_tensors):
     op_losses={}
     op_metrics={}
     op_outputs={}
+    epsilon = 1e-6
 
     # preprocess args
     if args.enable_shortcuts:
@@ -87,35 +91,40 @@ def inference(args,input_tensors):
     # helpers for defining summaries
     def make_summaries(mk_summary):
         make_summaries_without_newuser(mk_summary)
-        if not args.minimal_summary:
+        if args.summary_newusers:
             def mk_summary2(basename,weights):
                 return mk_summary(basename+'newuser/',weights*newuser_vec)
             make_summaries_without_newuser(mk_summary2)
 
     def make_summaries_without_newuser(mk_summary):
         with tf.name_scope('mk_summaries'):
-            if not args.minimal_summary:
+            if args.summary_size=='small':
+                summary_langs=[]
+                summary_countries=[]
+            elif args.summary_size=='med':
                 summary_langs=['en','ja','es','ar','fr','ko','zh','pt','tr','tl','in','und']
-                #summary_langs=hash.langs
-                for lang in summary_langs:
-                    weights = tf.cast(tf.equal(input_tensors['lang_'],hash.lang2int(lang)),tf.float32)
-                    weights = tf.reshape(weights,[args.batchsize])
-                    mk_summary('filter_'+lang+'/',weights)
-
                 summary_countries=['US','MX','ES','FR','JP']
-                #summary_countries=hash.country_codes
-                for country in summary_countries:
-                    weights = tf.cast(tf.equal(input_tensors['country_'],hash.country2int(country)),tf.float32)
-                    weights = tf.reshape(weights,[args.batchsize])
-                    mk_summary('filter_'+country+'/',weights)
+            elif args.summary_size=='large':
+                summary_langs=hash.langs
+                summary_countries=hash.country_codes
 
-                weights = tf.cast(tf.not_equal(input_tensors['lang_'],hash.lang2int('en')),tf.float32)
+            for lang in summary_langs:
+                weights = tf.cast(tf.equal(input_tensors['lang_'],hash.lang2int(lang)),tf.float32)
                 weights = tf.reshape(weights,[args.batchsize])
-                mk_summary('all_minus_en/',weights)
+                mk_summary('filter_'+lang+'/',weights)
 
-                weights = tf.cast(tf.not_equal(input_tensors['country_'],hash.country2int('US')),tf.float32)
+            for country in summary_countries:
+                weights = tf.cast(tf.equal(input_tensors['country_'],hash.country2int(country)),tf.float32)
                 weights = tf.reshape(weights,[args.batchsize])
-                mk_summary('all_minus_us/',weights)
+                mk_summary('filter_'+country+'/',weights)
+
+            weights = tf.cast(tf.not_equal(input_tensors['lang_'],hash.lang2int('en')),tf.float32)
+            weights = tf.reshape(weights,[args.batchsize])
+            mk_summary('all_minus_en/',weights)
+
+            weights = tf.cast(tf.not_equal(input_tensors['country_'],hash.country2int('US')),tf.float32)
+            weights = tf.reshape(weights,[args.batchsize])
+            mk_summary('all_minus_us/',weights)
 
             weights = tf.ones(input_tensors['lang_'].get_shape())
             weights = tf.reshape(weights,[args.batchsize])
@@ -131,7 +140,7 @@ def inference(args,input_tensors):
     # helper for making xentropy layers with appropriate summaries
     def mk_xentropy_layer(valname,val_,logits):
 
-        xentropy = tf.reduce_sum(tf.nn.sparse_softmax_cross_entropy_with_logits(
+        xentropy = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(
                 labels=tf.to_int64(tf.reshape(val_,[args.batchsize])),
                 logits=logits,
                 name='xentropy'
@@ -569,99 +578,94 @@ def inference(args,input_tensors):
                 # Mixture of fisher distributions
                 # see "directional statistics" by Mardia and Jupp for Fisher distribution
                 if 'aglm_mix' == args.pos_type:
+
+                    safeish_exp = lambda x: tf.exp(tf.minimum(x,30+tf.log(x+epsilon)),name='safeish_exp')
+
                     if args.pos_warmstart:
-                        mu0 = [ [ math.tan(city['lat']/360*2*math.pi),
-                                 math.tan(city['lon']/360*math.pi)
-                               ]
-                               for city in city_loc.get_cities(args.gmm_components)
-                             ]
+                        gps_coords_rad = [ [ city['lat']/360*2*math.pi,
+                                             city['lon']/360*math.pi
+                                           ]
+                                           for city in city_loc.get_cities(args.gmm_components)
+                                         ]
+                        pre_mu_gps_rad0 = tf.constant(gps_coords_rad,shape=[args.gmm_components,2])
+                        pre_mu_tan = tf.tan(pre_mu_gps_rad0)
                     else:
-                        mu0 = 0.1
-                    pre_mu_constant = tf.constant(mu0,shape=[args.gmm_components,2])
-                    pre_kappa_constant = tf.constant(args.gmm_kappa0,shape=[args.gmm_components])
+                        pre_mu_gps0 = 0.1
 
                     if args.gmm_type=='simple' or args.gmm_type=='verysimple':
                         trainable=args.gmm_type!='verysimple'
-                        pre_mu = tf.Variable(pre_mu_constant,name='pre_mu',trainable=trainable)
-                        mu = tf.reshape( tf.stack([ tf.cos(pre_mu[:,0])
-                                                  , tf.sin(pre_mu[:,0]) * tf.cos(pre_mu[:,1])
-                                                  , tf.sin(pre_mu[:,0]) * tf.sin(pre_mu[:,1])
-                                                  ]),
-                                         [3,1,args.gmm_components])
-                        pre_kappa = tf.Variable(pre_kappa_constant,name='pre_kappa')
-                        kappa = tf.reshape( tf.exp(pre_kappa), [1,args.gmm_components])
+                        pre_mu_var = tf.Variable(pre_mu_gps_rad0,name='pre_mu',trainable=trainable)
+                        pre_mu_reshape = tf.reshape(pre_mu_var,[1,args.gmm_components,2])
+                        pre_mu = args.gmm_lrfactor*pre_mu_reshape+(1-args.gmm_lrfactor)*tf.stop_gradient(pre_mu_reshape)
 
                     else:
                         with tf.name_scope('pre_mu'):
-                            w = tf.Variable(var_init([pos_final_layer_size,args.gmm_components,2],0.1),name='w')
-                            b = tf.Variable(pre_mu_constant,name='b')
-                            pre_mu = tf.tensordot(pos_final_layer,w,axes=[1,0])+b
-                        mu = tf.stack([ tf.cos(pre_mu[:,:,0])
-                                      , tf.sin(pre_mu[:,:,0]) * tf.cos(pre_mu[:,:,1])
-                                      , tf.sin(pre_mu[:,:,0]) * tf.sin(pre_mu[:,:,1])
-                                      ])
+                            w = tf.Variable(tf.zeros([pos_final_layer_size,args.gmm_components,2]),name='w')
+                            b = tf.Variable(pre_mu_tan,name='b')
+                            pre_mu_tan = tf.tensordot(pos_final_layer,w,axes=[1,0])+b
+                            pre_mu = tf.atan(pre_mu_tan)
 
-                        pre_kappa = tf.Variable(pre_kappa_constant,name='pre_kappa')
-                        kappa = tf.exp(pre_kappa)
-
-                        # FIXME: making kappa depend on pos_final_layer intoduces a degenerate dependency on mu which prevents optimization
+                        # FIXME: making kappa depend on pos_final_layer introduces a degenerate dependency on mu which prevents optimization
                         #with tf.name_scope('pre_kappa'):
                             #w = tf.Variable(var_init([pos_final_layer_size,args.gmm_components],0.1),name='w')
                             #b = tf.Variable(pre_kappa_constant,name='b')
                             #pre_kappa = tf.tensordot(pos_final_layer,w,axes=[1,0])+b
                         #kappa = tf.exp(pre_kappa)
 
-                    pre_mu_lat = tf.atan(pre_mu[:,0])*360/2/math.pi
-                    pre_mu_lon = tf.atan(pre_mu[:,1])*360/math.pi
-                    pre_mu_gps = tf.stack([pre_mu_lat,pre_mu_lon],axis=1)
+                    with tf.name_scope('debug'):
+                        pre_kappa_constant = tf.constant(args.gmm_prekappa0,shape=[args.gmm_components])
+                        pre_kappa_var = tf.Variable(pre_kappa_constant,name='pre_kappa',trainable=True)
+                        pre_kappa = pre_kappa_var
+                        pre_kappa = tf.Variable(pre_kappa_constant,name='pre_kappa')
+                        kappa = safeish_exp(pre_kappa)
+                        #kappa = tf.Variable(tf.exp(pre_kappa_constant))
+                        #pre_kappa = tf.log(tf.abs(kappa)+epsilon)
 
-                    x = tf.stack([ tf.cos(op_lat_rad_)
-                                 , tf.sin(op_lat_rad_) * tf.cos(op_lon_rad_)
-                                 , tf.sin(op_lat_rad_) * tf.sin(op_lon_rad_)
-                                 ])
-                    x_reshape = tf.reshape(x,[3,args.batchsize,1])
+                        mu = tf.stack([ tf.sin(pre_mu[:,:,0])
+                                      , tf.cos(pre_mu[:,:,0]) * tf.sin(pre_mu[:,:,1]*2)
+                                      , tf.cos(pre_mu[:,:,0]) * tf.cos(pre_mu[:,:,1]*2)
+                                      ])
+                        pre_mu_lat = pre_mu[:,:,0]*360/2/math.pi
+                        pre_mu_lon = pre_mu[:,:,1]*360/math.pi
+                        pre_mu_gps = tf.stack([pre_mu_lat,pre_mu_lon],axis=1)
 
-                    w = tf.Variable(var_init([pos_final_layer_size,args.gmm_components],0.1),name='w')
-                    b = tf.Variable(tf.constant(0.1,shape=[args.gmm_components]),name='b')
-                    mixture_logits = tf.matmul(pos_final_layer,w)+b
+                        x = tf.stack([ tf.sin(op_lat_rad_)
+                                     , tf.cos(op_lat_rad_) * tf.sin(op_lon_rad_*2)
+                                     , tf.cos(op_lat_rad_) * tf.cos(op_lon_rad_*2)
+                                     ])
+                        x_reshape = tf.reshape(x,[3,args.batchsize,1])
 
-                    if args.gmm_maxprob != None:
-                        gamma_low = 0.0
-                        mixture_logits = tf.minimum(
-                            tf.maximum(gamma_low,mixture_logits),
-                            math.log(args.gmm_maxprob)+math.log(args.gmm_components)+gamma_low
-                            )
+                        w = tf.Variable(var_init([pos_final_layer_size,args.gmm_components],0.01),name='w')
+                        b = tf.Variable(tf.constant(0.1,shape=[args.gmm_components]),name='b')
+                        mixture_logits = tf.matmul(pos_final_layer,w)+b
+                        mixture = tf.nn.softmax(mixture_logits + epsilon) + epsilon
 
-                    #mixture_logits_max = tf.reduce_max(mixture_logits,axis=1)
-                    mixture_prior = tf.constant(1.0,shape=mixture_logits.get_shape())
-                    mixture = tf.nn.softmax(mixture_logits+mixture_prior)
-                    #mixture1 = tf.nn.softmax(mixture_logits+mixture_prior)
-                    #mixture1_max = tf.reduce_max(mixture1,axis=1)
-                    #print('mixture1_max=',mixture1_max)
-                    #mixture1_max/log(a*sum(args.gmm_components+mixture1_max))=t
-                    #a=exp(x/t)/(sum(exp(x_i/t)))
-                    #a*sum(exp(x_i/t))=exp(x/t)
-                    #temperature = tf.reshape(tf.where(
-                        #mixture1_max <= args.gmm_maxprob,
-                        #tf.constant(1.0,shape=[args.batchsize]),
-                        #mixture_logits_max/tf.log(args.gmm_maxprob*(args.gmm_components+mixture_logits_max))
-                        ##tf.log(args.gmm_maxprob)/mixture1_max
-                        #),[args.batchsize,1])
-                    #print('mixture_logits=',mixture_logits)
-                    #print('temperature=',temperature)
-                    #mixture = tf.nn.softmax((mixture_logits+mixture_prior)/temperature)
+                        #safe_logsinh = lambda x: tf.where(
+                                #tf.greater(x,1.0),
+                                #x-0.693147,
+                                #tf.log(tf.sinh(x+epsilon)+epsilon),
+                                #)
+                        #log_likelihood_per_component = pre_kappa - safe_logsinh(kappa) + (kappa * tf.reduce_sum(x_reshape*mu,axis=0))
 
-                    #log_loss = - pre_kappa + tf.log(tf.sinh(kappa)) - kappa * tf.tensordot(x,mu,axes=[0,0])
-                    log_loss = - pre_kappa + tf.log(tf.sinh(kappa)) - kappa * tf.reduce_sum(x_reshape*mu,axis=0)
-                    mixed_log_loss=tf.reduce_sum(log_loss*mixture,axis=1)
+                        log_likelihood_per_component = tf.where(
+                            tf.greater(kappa,1.0),
+                            -kappa,
+                            -kappa*kappa
+                            )+(kappa * tf.reduce_sum(x_reshape*mu,axis=0))
+                        likelihood_mixed = tf.reduce_sum(safeish_exp(log_likelihood_per_component)*mixture,axis=1)
+                        log_loss = - tf.log(likelihood_mixed + epsilon)
 
-                    loss=tf.reduce_mean(mixed_log_loss)
-                    op_losses['pos_loss_mix']=loss
-                    op_metrics['optimization/aglm_mix']=tf.contrib.metrics.streaming_mean(loss,name='aglm_mix')
+                        loss=tf.reduce_mean(log_loss,name='dbgloss')
+                        op_losses['pos_loss_mix']=loss
+                        op_metrics['optimization/aglm_mix']=tf.contrib.metrics.streaming_mean(loss,name='aglm_mix')
 
                     with tf.name_scope('summaries'):
                         vals,indices=tf.nn.top_k(mixture,k=args.gmm_components)
                         mixture_sum=tf.reduce_mean(tf.reduce_sum(mixture,axis=1))
+                        pre_kappa_max=tf.reduce_max(pre_kappa)
+                        op_metrics['mix/pre_kappa_max']=tf.contrib.metrics.streaming_mean(pre_kappa_max,name='pre_kappa_max')
+                        pre_kappa_min=tf.reduce_min(pre_kappa)
+                        op_metrics['mix/pre_kappa_min']=tf.contrib.metrics.streaming_mean(pre_kappa_min,name='pre_kappa_min')
                         op_metrics['mix/sum']=tf.contrib.metrics.streaming_mean(mixture_sum,name='mixture_sum')
                         logits_max=tf.reduce_mean(tf.reduce_max(mixture_logits,axis=1))
                         op_metrics['mix/logits_max']=tf.contrib.metrics.streaming_mean(logits_max,name='logits_max')
@@ -679,18 +683,25 @@ def inference(args,input_tensors):
                             op_metrics['mix/percentile_'+str(p)]=tf.contrib.metrics.streaming_mean(topp,name='topp_'+str(p))
 
                     #main_component=tf.nn.softmax(mixture) #,axis=1)
-                    main_component=mixture #,axis=1)
-                    main_component_reshape=tf.reshape(main_component,[args.batchsize,args.gmm_components,1])
-                    #main_component=tf.reshape(tf.argmax(logits,axis=1),shape=[args.batchsize,1,1])
-                    #main_component_reshape=tf.cast(tf.tile(main_component,[1,args.gmm_components,1]),dtype=tf.float32)
+                    main_component=mixture
+                    main_component=tf.where(
+                            tf.equal(tf.reduce_max(mixture, axis=1, keepdims=True), mixture),
+                            tf.constant(1.0, shape=mixture.shape),
+                            tf.constant(0.0, shape=mixture.shape)
+                            )
+                    main_component_reshape=tf.reshape(main_component,[args.batchsize,1,args.gmm_components])
 
-                    op_gps_rad = tf.reduce_sum(main_component_reshape*pre_mu,axis=1)
+                    gps = tf.reduce_sum(main_component_reshape*pre_mu_gps,axis=2)
+                    op_lat = gps[:,0]
+                    op_lon = gps[:,1]
+                    #op_gps_rad = tf.reduce_sum(main_component_reshape*pre_mu_gps,axis=1)
                     #op_gps_rad = tf.tensordot(main_component,pre_mu,axes=[1,0])
-                    op_lat = tf.atan(op_gps_rad[:,0])*360/2/math.pi
-                    op_lon = tf.atan(op_gps_rad[:,1])*360/math.pi
-                    gps = tf.stack([op_lat,op_lon])
+                    #op_lat = tf.atan(op_gps_rad[:,0])*360/2/math.pi
+                    #op_lon = tf.atan(op_gps_rad[:,1])*360/math.pi
+                    #gps = tf.stack([op_lat,op_lon])
+                    #gps = tf.Print(gps,[gps,op_gps_rad,loss])
 
-                    op_outputs['aglm_mix/pre_mu']=pre_mu_gps
+                    op_outputs['aglm_mix/pre_mu_gps']=pre_mu_gps
                     op_outputs['aglm_mix/mu']=mu
                     op_outputs['aglm_mix/pre_kappa']=pre_kappa
                     op_outputs['aglm_mix/kappa']=kappa
@@ -699,8 +710,6 @@ def inference(args,input_tensors):
                 op_outputs['gps']=gps
 
                 # common outputs
-
-                epsilon = 1e-6
 
                 op_lat_rad = op_lat/360*2*math.pi
                 op_lon_rad = op_lon/360*math.pi
@@ -741,7 +750,7 @@ def inference(args,input_tensors):
                         lambda: tf.reduce_sum(weights*op_dist)/total_weights,
                         lambda: 0.0
                         )
-                    op_metrics[basename+'dist']=tf.contrib.metrics.streaming_mean(op_dist_ave,weights=total_weights,name='dist')
+                    op_metrics[basename+'dist']=tf.contrib.metrics.streaming_mean(op_dist_ave,weights=total_weights+1e-6,name='dist')
                     def mk_threshold(threshold):
                         op_threshold = tf.sign(op_dist-threshold)/2+0.5
                         op_threshold_ave = tf.cond(total_weights>0,
@@ -749,7 +758,7 @@ def inference(args,input_tensors):
                             lambda: 0.0
                             )
                         name=basename+'k'+str(threshold)
-                        op_metrics[name]=tf.contrib.metrics.streaming_mean(op_threshold_ave,weights=total_weights,name=name)
+                        op_metrics[name]=tf.contrib.metrics.streaming_mean(op_threshold_ave,weights=total_weights+1e-6,name=name)
                     mk_threshold(10)
                     mk_threshold(50)
                     mk_threshold(100)
@@ -830,7 +839,22 @@ def inference(args,input_tensors):
         op_loss_regularized=op_loss+tf.reduce_sum(regularizers)
         op_losses['optimization/op_loss_regularized']=op_loss_regularized
 
-        return op_metrics,op_loss_regularized,op_outputs
+        return op_metrics,op_loss_regularized,op_losses,op_outputs
+
+################################################################################
+
+def preprocess_text(args,str):
+    import unicodedata
+
+    # simplify the unicode representation
+    str=unicodedata.normalize('NFKC',unicode(str.lower()))
+
+    # remove urls if needed
+    if args.remove_urls:
+        import re
+        str = re.sub(r'https?:\/\/\S*', '', str, flags=re.MULTILINE)
+
+    return str
 
 ################################################################################
 
@@ -842,11 +866,9 @@ def json2dict(args,str):
     import unicodedata
     import numpy as np
     data=json.loads(str)
+    data['text']=preprocess_text(args,data['text'])
 
     batch_dict={}
-
-    # simplify the unicode representation
-    data['text']=unicodedata.normalize('NFKC',unicode(data['text'].lower()))
 
     # FIXME: possibly skip locations
     #if args.loc_filter:

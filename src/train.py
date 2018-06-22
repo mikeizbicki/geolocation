@@ -22,6 +22,7 @@ parser.add_argument('--seed',type=int,default=0)
 # debug variables
 parser.add_argument('--no_checkpoint',action='store_true')
 parser.add_argument('--repeat_batch',action='store_true')
+parser.add_argument('--tfdbg',action='store_true')
 
 # model hyperparameters
 parser.add_argument('--data',type=str,required=True)
@@ -80,7 +81,7 @@ input_tensors={
     'hash_' : tf.sparse_placeholder(tf.float32,name='hash_'),
 }
 
-op_metrics,op_loss_regularized,op_outputs = model.inference(args,input_tensors)
+op_metrics,op_loss_regularized,op_losses,op_outputs = model.inference(args,input_tensors)
 
 # optimization nodes
 with tf.name_scope('optimization'):
@@ -99,7 +100,11 @@ with tf.name_scope('optimization'):
         optimizer = tf.train.AdamOptimizer(learningrate)
     elif args.optimizer=='sgd':
         optimizer = tf.train.MomentumOptimizer(learningrate,args.momentum)
-    train_op = optimizer.minimize(op_loss_regularized, global_step=global_step)
+    #train_op = optimizer.minimize(op_loss_regularized, global_step=global_step)
+
+    gradients, variables = zip(*optimizer.compute_gradients(op_loss_regularized))
+    gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
+    train_op = optimizer.apply_gradients(zip(gradients, variables), global_step=global_step)
 
 ########################################
 print('preparing logging')
@@ -137,6 +142,22 @@ with open(log_dir+'/args.json','w') as f:
 config = tf.ConfigProto(allow_soft_placement = True)
 sess = tf.Session(config=config)
 
+if args.tfdbg:
+    from tensorflow.python import debug as tf_debug
+    sess = tf_debug.LocalCLIDebugWrapperSession(sess)
+
+    def my_filter_callable(datum, tensor):
+        if ('dbgloss' in datum.node_name or
+            'kappa' in datum.node_name
+            #'optimization' in datum.node_name
+           ) and 'summar' not in datum.node_name:
+            return tf_debug.has_inf_or_nan(datum,tensor)
+        #print('datum=',datum)
+        #print('tensor=',tensor)
+        #return len(tensor.shape) == 0 and tensor == 0.0
+    sess.add_tensor_filter('my_filter', my_filter_callable)
+
+
 saver = tf.train.Saver(max_to_keep=100000)
 if not args.no_checkpoint:
     for k,(v,_) in op_metrics.iteritems():
@@ -158,7 +179,11 @@ if args.initial_weights:
     var_dict={}
     for k in sorted(var_to_shape_map):
         try:
-            var_dict[k]=tf.get_default_graph().get_tensor_by_name(k+":0")
+            var=tf.get_default_graph().get_tensor_by_name(k+":0")
+            if var.get_shape() == var_to_shape_map[k]:
+                var_dict[k]=var
+            else:
+                print('  not restoring',k,'; old=',var_to_shape_map[k],'; new=',var.get_shape())
         except:
             pass
     #print('  restored_vars=',var_dict)
@@ -346,7 +371,7 @@ while True:
             summary_writer.flush()
 
         # save model if not debugging
-        if stats_step['count'] % args.stepsave == 0 and not args.no_checkpoint:
+        if (stats_step['count'] in [1,100,1000] or stats_step['count'] % args.stepsave == 0) and not args.no_checkpoint:
             checkpoint_file = os.path.join(log_dir, 'model.ckpt')
             saver.save(sess, checkpoint_file, global_step=stats_step['count'])
 
