@@ -14,7 +14,7 @@ if [ -z $SLURM_SUBMIT_DIR ]; then
     if [[ $1 = "gpu" ]]; then
         opts_gpu="-p gpu --gres=gpu:1"
     fi
-    opts_slurm="--mem=20g --time=100:00:00"
+    opts_slurm="--mem=20g --time=21-0:00:00"
     opts_log="--log_dir=$output --log_name=${vars}"
     sbatch $opts_debug $opts_gpu $opts_slurm submit.sh $@ $opts_log
 

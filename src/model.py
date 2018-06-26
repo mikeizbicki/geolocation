@@ -41,12 +41,14 @@ def update_parser(parser):
     parser.add_argument('--pos_shortcut',choices=['lang','loc','country'],default=[],nargs='*')
     parser.add_argument('--pos_warmstart',type=bool,default=True)
     parser.add_argument('--gmm_type',choices=['verysimple','simple','complex'],default='complex')
+    parser.add_argument('--gmm_distribution',choices=['fvm','gaussian','efam'],default='fvm')
     parser.add_argument('--gmm_lrfactor',type=float,default=1e-2)
     parser.add_argument('--gmm_notrain',action='store_true')
     parser.add_argument('--gmm_components',type=int,default=1)
     parser.add_argument('--gmm_prekappa0',type=float,default=10.0)
     parser.add_argument('--gmm_maxprob',type=float,default=None)
     parser.add_argument('--gmm_distloss',action='store_true')
+    parser.add_argument('--gmm_decomposed',type=int,nargs='*',default=[])
     parser.add_argument('--country_shortcut',choices=['bow','lang'],default=[],nargs='*')
     parser.add_argument('--loc_type',choices=['popular','hash'],default='hash')
     parser.add_argument('--loc_filter',action='store_true')
@@ -591,12 +593,15 @@ def inference(args,input_tensors):
                         pre_mu_tan = tf.tan(pre_mu_gps_rad0)
                     else:
                         pre_mu_gps0 = 0.1
+                    pre_kappa_constant = tf.constant(args.gmm_prekappa0,shape=[args.gmm_components])
 
                     if args.gmm_type=='simple' or args.gmm_type=='verysimple':
                         trainable=args.gmm_type!='verysimple'
                         pre_mu_var = tf.Variable(pre_mu_gps_rad0,name='pre_mu',trainable=trainable)
                         pre_mu_reshape = tf.reshape(pre_mu_var,[1,args.gmm_components,2])
                         pre_mu = args.gmm_lrfactor*pre_mu_reshape+(1-args.gmm_lrfactor)*tf.stop_gradient(pre_mu_reshape)
+                        pre_kappa = tf.Variable(pre_kappa_constant,name='pre_kappa',trainable=trainable)
+                        kappa = safeish_exp(pre_kappa)
 
                     else:
                         with tf.name_scope('pre_mu'):
@@ -605,6 +610,9 @@ def inference(args,input_tensors):
                             pre_mu_tan = tf.tensordot(pos_final_layer,w,axes=[1,0])+b
                             pre_mu = tf.atan(pre_mu_tan)
 
+                            pre_kappa = tf.Variable(pre_kappa_constant,name='pre_kappa')
+                            kappa = safeish_exp(pre_kappa)
+
                         # FIXME: making kappa depend on pos_final_layer introduces a degenerate dependency on mu which prevents optimization
                         #with tf.name_scope('pre_kappa'):
                             #w = tf.Variable(var_init([pos_final_layer_size,args.gmm_components],0.1),name='w')
@@ -612,69 +620,118 @@ def inference(args,input_tensors):
                             #pre_kappa = tf.tensordot(pos_final_layer,w,axes=[1,0])+b
                         #kappa = tf.exp(pre_kappa)
 
-                    with tf.name_scope('debug'):
-                        pre_kappa_constant = tf.constant(args.gmm_prekappa0,shape=[args.gmm_components])
-                        pre_kappa_var = tf.Variable(pre_kappa_constant,name='pre_kappa',trainable=True)
-                        pre_kappa = pre_kappa_var
-                        pre_kappa = tf.Variable(pre_kappa_constant,name='pre_kappa')
-                        kappa = safeish_exp(pre_kappa)
-                        #kappa = tf.Variable(tf.exp(pre_kappa_constant))
-                        #pre_kappa = tf.log(tf.abs(kappa)+epsilon)
+                    #kappa = tf.Variable(tf.exp(pre_kappa_constant))
+                    #pre_kappa = tf.log(tf.abs(kappa)+epsilon)
 
-                        mu = tf.stack([ tf.sin(pre_mu[:,:,0])
-                                      , tf.cos(pre_mu[:,:,0]) * tf.sin(pre_mu[:,:,1]*2)
-                                      , tf.cos(pre_mu[:,:,0]) * tf.cos(pre_mu[:,:,1]*2)
-                                      ])
-                        pre_mu_lat = pre_mu[:,:,0]*360/2/math.pi
-                        pre_mu_lon = pre_mu[:,:,1]*360/math.pi
-                        pre_mu_gps = tf.stack([pre_mu_lat,pre_mu_lon],axis=1)
+                    mu = tf.stack([ tf.sin(pre_mu[:,:,0])
+                                  , tf.cos(pre_mu[:,:,0]) * tf.sin(pre_mu[:,:,1]*2)
+                                  , tf.cos(pre_mu[:,:,0]) * tf.cos(pre_mu[:,:,1]*2)
+                                  ])
+                    pre_mu_lat = pre_mu[:,:,0]*360/2/math.pi
+                    pre_mu_lon = pre_mu[:,:,1]*360/math.pi
+                    pre_mu_gps = tf.stack([pre_mu_lat,pre_mu_lon],axis=1)
 
-                        x = tf.stack([ tf.sin(op_lat_rad_)
-                                     , tf.cos(op_lat_rad_) * tf.sin(op_lon_rad_*2)
-                                     , tf.cos(op_lat_rad_) * tf.cos(op_lon_rad_*2)
-                                     ])
-                        x_reshape = tf.reshape(x,[3,args.batchsize,1])
+                    x = tf.stack([ tf.sin(op_lat_rad_)
+                                 , tf.cos(op_lat_rad_) * tf.sin(op_lon_rad_*2)
+                                 , tf.cos(op_lat_rad_) * tf.cos(op_lon_rad_*2)
+                                 ])
+                    x_reshape = tf.reshape(x,[3,args.batchsize,1])
 
-                        w = tf.Variable(var_init([pos_final_layer_size,args.gmm_components],0.01),name='w')
-                        b = tf.Variable(tf.constant(0.1,shape=[args.gmm_components]),name='b')
-                        mixture_logits = tf.matmul(pos_final_layer,w)+b
-                        mixture = tf.nn.softmax(mixture_logits + epsilon) + epsilon
+                    def decomposed_linear_layer(input_layer,mid_layer_sizes,output_size):
+                        t={}
+                        input_layer_size=int(input_layer.get_shape()[1])
+                        with tf.name_scope('decomposed_linear_layer'):
+                            for i in mid_layer_sizes:
+                                with tf.name_scope('grouping_'+str(i)):
+                                    w1 = tf.Variable(var_init([input_layer_size,i]),name='w1')
+                                    w2 = tf.Variable(var_init([i,output_size]),name='w2')
+                                    t[i] = tf.matmul(tf.matmul(input_layer,w1),w2)
+                            with tf.name_scope('grouping_all'):
+                                w = tf.Variable(var_init([input_layer_size,output_size]),name='w')
+                                b = tf.Variable(tf.constant(0.1,shape=[output_size]),name='b')
+                                t['all']=tf.matmul(input_layer,w)+b
+                            logits=sum(t.values())
+                        return logits
 
-                        #safe_logsinh = lambda x: tf.where(
-                                #tf.greater(x,1.0),
-                                #x-0.693147,
-                                #tf.log(tf.sinh(x+epsilon)+epsilon),
-                                #)
-                        #log_likelihood_per_component = pre_kappa - safe_logsinh(kappa) + (kappa * tf.reduce_sum(x_reshape*mu,axis=0))
 
+                    w = tf.Variable(var_init([pos_final_layer_size,args.gmm_components],0.01),name='w')
+                    b = tf.Variable(tf.constant(0.1,shape=[args.gmm_components]),name='b')
+                    mixture_logits = tf.matmul(pos_final_layer,w)+b
+                    #mixture_logits = decomposed_linear_layer(pos_final_layer,args.gmm_decomposed,args.gmm_components)
+                    mixture = tf.nn.softmax(mixture_logits + epsilon) + epsilon
+
+                    #safe_logsinh = lambda x: tf.where(
+                            #tf.greater(x,1.0),
+                            #x-0.693147,
+                            #tf.log(tf.sinh(x+epsilon)+epsilon),
+                            #)
+                    #log_likelihood_per_component = pre_kappa - safe_logsinh(kappa) + (kappa * tf.reduce_sum(x_reshape*mu,axis=0))
+
+                    if args.gmm_distribution=='fvm':
                         log_likelihood_per_component = tf.where(
                             tf.greater(kappa,1.0),
                             -kappa,
                             -kappa*kappa
                             )+(kappa * tf.reduce_sum(x_reshape*mu,axis=0))
-                        likelihood_mixed = tf.reduce_sum(safeish_exp(log_likelihood_per_component)*mixture,axis=1)
-                        log_loss = - tf.log(likelihood_mixed + epsilon)
+                    elif args.gmm_distribution=='gaussian':
+                        vecsum=tf.reduce_sum(tf.abs(x_reshape-mu)**2.0,axis=0)
+                        log_likelihood_per_component = tf.exp(-kappa*vecsum)
+                    elif args.gmm_distribution=='efam':
+                        pow_var = tf.Variable(tf.constant(0.1,shape=[args.gmm_components]),name='pow',trainable=True)
+                        pow = tf.maximum(pow_var,1e-9)
+                        op_outputs['aglm_mix/pow']=pow
+                        vecsum=tf.reduce_sum(tf.abs(x_reshape-mu)**pow,axis=0)
+                        log_likelihood_per_component = tf.exp(-kappa*vecsum)
+                        #safeish_exp2 = lambda x: tf.exp(tf.minimum(x,2+tf.log(x+epsilon)),name='safeish_exp')
+                        #log_likelihood_per_component = tf.exp(-pre_kappa*(x_reshape-mu))**pow
 
-                        loss=tf.reduce_mean(log_loss,name='dbgloss')
-                        op_losses['pos_loss_mix']=loss
-                        op_metrics['optimization/aglm_mix']=tf.contrib.metrics.streaming_mean(loss,name='aglm_mix')
+                    likelihood_mixed = tf.reduce_sum(safeish_exp(log_likelihood_per_component)*mixture,axis=1)
+                    log_loss = - tf.log(likelihood_mixed + epsilon)
+                    loss=tf.reduce_mean(log_loss,name='dbgloss')
+                    op_losses['pos_loss_mix']=loss
+                    op_metrics['optimization/aglm_mix']=tf.contrib.metrics.streaming_mean(loss,name='aglm_mix')
 
                     with tf.name_scope('summaries'):
                         vals,indices=tf.nn.top_k(mixture,k=args.gmm_components)
                         mixture_sum=tf.reduce_mean(tf.reduce_sum(mixture,axis=1))
-                        pre_kappa_max=tf.reduce_max(pre_kappa)
-                        op_metrics['mix/pre_kappa_max']=tf.contrib.metrics.streaming_mean(pre_kappa_max,name='pre_kappa_max')
-                        pre_kappa_min=tf.reduce_min(pre_kappa)
-                        op_metrics['mix/pre_kappa_min']=tf.contrib.metrics.streaming_mean(pre_kappa_min,name='pre_kappa_min')
+
+                        def summarize_vector(v,n):
+                            with tf.name_scope(n):
+                                op_metrics['mix/'+n+'/max']=tf.contrib.metrics.streaming_mean(
+                                    tf.reduce_max(v),
+                                    name=n+'_max'
+                                    )
+                                op_metrics['mix/'+n+'/min']=tf.contrib.metrics.streaming_mean(
+                                    tf.reduce_min(v),
+                                    name=n+'_min'
+                                    )
+                                op_metrics['mix/'+n+'/mean']=tf.contrib.metrics.streaming_mean(
+                                    tf.reduce_mean(v),
+                                    name=n+'_mean'
+                                    )
+
+                        summarize_vector(pre_kappa,'pre_kappa')
+                        summarize_vector(logits,'logits')
+                        summarize_vector(w,'w')
+                        try:
+                            summarize_vector(pow,'pow')
+                        except:
+                            pass
+
                         op_metrics['mix/sum']=tf.contrib.metrics.streaming_mean(mixture_sum,name='mixture_sum')
-                        logits_max=tf.reduce_mean(tf.reduce_max(mixture_logits,axis=1))
-                        op_metrics['mix/logits_max']=tf.contrib.metrics.streaming_mean(logits_max,name='logits_max')
-                        logits_min=tf.reduce_mean(tf.reduce_min(mixture_logits,axis=1))
-                        op_metrics['mix/logits_min']=tf.contrib.metrics.streaming_mean(logits_min,name='logits_min')
-                        w_max=tf.reduce_max(w)
-                        op_metrics['mix/w_max']=tf.contrib.metrics.streaming_mean(logits_max,name='w_max')
-                        w_min=tf.reduce_min(w)
-                        op_metrics['mix/w_min']=tf.contrib.metrics.streaming_mean(logits_min,name='w_min')
+
+                        #pre_kappa_max=tf.reduce_max(pre_kappa)
+                        #op_metrics['mix/pre_kappa_max']=tf.contrib.metrics.streaming_mean(pre_kappa_max,name='pre_kappa_max')
+                        #pre_kappa_min=tf.reduce_min(pre_kappa)
+                        #op_metrics['mix/pre_kappa_min']=tf.contrib.metrics.streaming_mean(pre_kappa_min,name='pre_kappa_min')
+                        #logits_max=tf.reduce_mean(tf.reduce_max(mixture_logits,axis=1))
+                        #op_metrics['mix/logits_max']=tf.contrib.metrics.streaming_mean(logits_max,name='logits_max')
+                        #logits_min=tf.reduce_mean(tf.reduce_min(mixture_logits,axis=1))
+                        #op_metrics['mix/logits_min']=tf.contrib.metrics.streaming_mean(logits_min,name='logits_min')
+                        #w_max=tf.reduce_max(w)
+                        #op_metrics['mix/w_max']=tf.contrib.metrics.streaming_mean(logits_max,name='w_max')
+                        #w_min=tf.reduce_min(w)
+                        #op_metrics['mix/w_min']=tf.contrib.metrics.streaming_mean(logits_min,name='w_min')
                         for k in [0,1,2]:
                             topk=vals[:,min(k,args.gmm_components-1)]
                             op_metrics['mix/top'+str(k)+'_loss']=tf.contrib.metrics.streaming_mean(topk,name='topk_'+str(k))
@@ -685,7 +742,7 @@ def inference(args,input_tensors):
                     #main_component=tf.nn.softmax(mixture) #,axis=1)
                     main_component=mixture
                     main_component=tf.where(
-                            tf.equal(tf.reduce_max(mixture, axis=1, keepdims=True), mixture),
+                            tf.equal(tf.reduce_max(mixture, axis=1, keep_dims=True), mixture),
                             tf.constant(1.0, shape=mixture.shape),
                             tf.constant(0.0, shape=mixture.shape)
                             )

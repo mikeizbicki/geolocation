@@ -16,7 +16,8 @@ parser=argparse.ArgumentParser('infer using a model')
 
 parser.add_argument('--modeldir',type=str)
 parser.add_argument('--outputdir',type=str,default='img-infer')
-parser.add_argument('--tweets',type=str,default='data/infer/riverside')
+#parser.add_argument('--tweets',type=str,default='data/infer/riverside')
+parser.add_argument('--tweets',type=str,default='data/infer/infer')
 #parser.add_argument('--tweets',type=str,default='data/twitter-early/geoTwitter17-10-21/geoTwitter17-10-21_01:05.gz')
 #parser.add_argument('--tweets',type=str,default='data/MX/train.gz')
 parser.add_argument('--maxtweets',type=int,default=100)
@@ -40,6 +41,8 @@ with open(args.modeldir+'/args.json','r') as f:
 
     args_train=MyNamespace(json.loads(args_str))
     args_train.gmm_lrfactor=0.1
+    args_train.summary_size='small'
+    args_train.summary_newusers=False
 
 ########################################
 print('loading model weights')
@@ -87,6 +90,8 @@ import matplotlib.font_manager as fm
 
 font_paths=[
     'fonts/NotoSansMonoCJKjp-Regular.otf',
+    'fonts/NotoSansThai-Regular.ttf',
+    'fonts/NotoKufiArabic-Regular.ttf',
     'fonts/NotoEmoji-Regular.ttf',
     'fonts/NotoMono-Regular.ttf',
     ]
@@ -163,10 +168,10 @@ for tweetnum in range(0,args.maxtweets):
     mu=np.reshape(output['aglm_mix/mu'],[3,args_train.gmm_components])
     #mu=gps2sphere(pre_mu_gps[0,:],pre_mu_gps[1,:])
 
-    #pre_kappa=output['aglm_mix/pre_kappa']
-    #kappa=output['aglm_mix/kappa']
-    pre_kappa=8
-    kappa=math.exp(pre_kappa)
+    pre_kappa=output['aglm_mix/pre_kappa']
+    kappa=output['aglm_mix/kappa']
+    #pre_kappa=0.001
+    #kappa=math.exp(pre_kappa)
 
     mixture=output['aglm_mix/mixture']
     #print('mixture=',mixture)
@@ -258,7 +263,8 @@ for tweetnum in range(0,args.maxtweets):
 
     # add tweet title
     ax0 = plt.subplot(gs[0,:])
-    mk_tweet_ax('optimization/op_loss_regularized',ax0)
+    #mk_tweet_ax('optimization/op_loss_regularized',ax0)
+    mk_tweet_ax('country_xentropy',ax0)
     #wrappedtweet='\n'.join(textwrap.wrap(tweet['text'],60))
     #plt.suptitle(wrappedtweet)
     #plt.subplots_adjust(bottom=0.1)
@@ -270,13 +276,35 @@ for tweetnum in range(0,args.maxtweets):
         def log_likelihood(lat,lon):
             x = gps2sphere(lat,lon)
             x_reshape=np.reshape(x,[3,1])
-            def safe_logsinh(x):
-                if x>5:
-                    return np.log(0.5)+x
-                else:
-                    return np.log(np.sinh(x))
-            #return np.log(np.dot(np.exp(pre_kappa - safe_logsinh(kappa) + kappa * np.sum(x_reshape*mu,axis=0)),np.transpose(mixture)))[0]
-            return np.sqrt(np.dot(np.exp(pre_kappa - safe_logsinh(kappa) + kappa * np.sum(x_reshape*mu,axis=0)),np.transpose(mixture)))[0]
+            #def safe_logsinh(x):
+                #if x>5:
+                    #return np.log(0.5)+x
+                #else:
+                    #return np.log(np.sinh(x))
+            safe_logsinh = lambda x:np.where(
+                np.greater(x,5),
+                np.log(0.5)+x,
+                np.log(np.sinh(x))
+                )
+            #safe_logsinh = lambda x: np.log(0.5)+x
+
+            #safe_logsinh = lambda x: np.log(np.sinh(x))
+            #return np.sqrt(np.dot(np.exp(pre_kappa - safe_logsinh(kappa) + kappa * np.sum(x_reshape*mu,axis=0)),np.transpose(mixture)))[0]
+            if args_train.gmm_distribution=='gaussian':
+                vecsum=np.sum(np.abs(x_reshape-mu)**2.0,axis=0)
+                loglikelihood_per_component = np.exp(-kappa*vecsum)
+            elif args_train.gmm_distribution=='efam':
+                vecsum=np.sum(np.abs(x_reshape-mu)**output['aglm_mix/pow'],axis=0)
+                loglikelihood_per_component = np.exp(-kappa*vecsum)
+            else:
+                loglikelihood_per_component=np.where(
+                        np.greater(kappa,1.0),
+                        -kappa,
+                        -kappa*kappa
+                        )+(kappa * np.sum(x_reshape*mu,axis=0))
+            likelihood_mixed = np.sum(np.exp(loglikelihood_per_component)*mixture,axis=1)
+            return likelihood_mixed
+            #log_loss = - tf.log(likelihood_mixed + epsilon)
 
         # set resolution
         if args.plot_res=='hi':
