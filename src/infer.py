@@ -44,6 +44,16 @@ with open(args.modeldir+'/args.json','r') as f:
     args_train.summary_size='small'
     args_train.summary_newusers=False
 
+    try:
+        args_train.hashes_uniq
+    except:
+        args_train.hashes_uniq=False
+        args_train.text_naive=True
+        args_train.text_multichar_init_bit=True
+        args_train.text_latin_bit=True
+        args_train.text_transliterate=True
+        args_train.text_hashsize_combiners=True
+
 ########################################
 print('loading model weights')
 
@@ -53,7 +63,7 @@ import copy
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 import model
-import hash
+import myhash
 
 def restore_session(batchsize):
     print('  restore_session(batchsize=',batchsize,')')
@@ -77,7 +87,8 @@ def restore_session(batchsize):
         config = tf.ConfigProto(allow_soft_placement = True)
         ret.sess = tf.Session(config=config)
         saver=tf.train.Saver()
-        chkpt_file=tf.train.latest_checkpoint(args.modeldir)
+        #chkpt_file=tf.train.latest_checkpoint(args.modeldir)
+        chkpt_file=args.modeldir+'/model.ckpt-130000'
         saver.restore(ret.sess,chkpt_file)
         return ret
 
@@ -119,6 +130,7 @@ import math
 import textwrap
 
 import matplotlib
+import matplotlib.colors as colors
 matplotlib.use('Agg')
 #matplotlib.use('ps')
 import matplotlib.pyplot as plt
@@ -276,20 +288,7 @@ for tweetnum in range(0,args.maxtweets):
         def log_likelihood(lat,lon):
             x = gps2sphere(lat,lon)
             x_reshape=np.reshape(x,[3,1])
-            #def safe_logsinh(x):
-                #if x>5:
-                    #return np.log(0.5)+x
-                #else:
-                    #return np.log(np.sinh(x))
-            safe_logsinh = lambda x:np.where(
-                np.greater(x,5),
-                np.log(0.5)+x,
-                np.log(np.sinh(x))
-                )
-            #safe_logsinh = lambda x: np.log(0.5)+x
 
-            #safe_logsinh = lambda x: np.log(np.sinh(x))
-            #return np.sqrt(np.dot(np.exp(pre_kappa - safe_logsinh(kappa) + kappa * np.sum(x_reshape*mu,axis=0)),np.transpose(mixture)))[0]
             if args_train.gmm_distribution=='gaussian':
                 vecsum=np.sum(np.abs(x_reshape-mu)**2.0,axis=0)
                 loglikelihood_per_component = np.exp(-kappa*vecsum)
@@ -304,7 +303,7 @@ for tweetnum in range(0,args.maxtweets):
                         )+(kappa * np.sum(x_reshape*mu,axis=0))
             likelihood_mixed = np.sum(np.exp(loglikelihood_per_component)*mixture,axis=1)
             return likelihood_mixed
-            #log_loss = - tf.log(likelihood_mixed + epsilon)
+            #return np.log(likelihood_mixed+1e-10)
 
         # set resolution
         if args.plot_res=='hi':
@@ -317,19 +316,44 @@ for tweetnum in range(0,args.maxtweets):
             nx=20
             ny=10
         lons, lats = m.makegrid(nx, ny)
-        z=np.zeros([nx,ny])
 
-        # plot contours
+        # generate plot data
+        z=np.zeros([nx,ny])
         for x in range(0,nx):
             for y in range(0,ny):
                 z[x][y]=log_likelihood(lats[y,x],lons[y,x])
 
-        cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", ['white','green','blue','yellow'])
-        norm=plt.Normalize(0,np.amax(z))
-        cs = m.contourf(lons,lats,np.transpose(z),latlon=True,antialiased=False,cmap=cmap,norm=norm) #,zorder=-1)
-        #plt.imshow(z,cmap=cmap,norm=norm)
-        #cbar = m.colorbar(cs,location='right',pad="5%")
-        #cbar.set_label('log likelihood (unnormalized)')
+        totalweights=np.sum(z)
+        #z=z/totalweights
+        z=np.log(z/totalweights+1e-10)/math.log(10)
+        levels=[-5,-4,-3,-2,-1]
+
+        zz=np.zeros([nx,ny])
+        numlevels=100
+        for x in range(0,nx):
+            for y in range(0,ny):
+
+                for i in range(0,numlevels):
+                    if z[x][y] >= totalweights*10**(-i):
+                        zz[x][y]=float(i)
+        #z=zz
+        #z=np.log(z/totalweights)
+
+        # plot contours
+        cmap = colors.LinearSegmentedColormap.from_list("", ['white','green','blue']) #,'yellow'])
+        norm = plt.Normalize(min(levels),max(levels))
+        cs = m.contourf(
+            lons,
+            lats,
+            np.transpose(z),
+            levels=levels,
+            latlon=True,
+            antialiased=True,
+            cmap=cmap,
+            norm=norm
+            )
+        cbar = m.colorbar(cs,location='right',pad="5%")
+        cbar.set_label('log error rate')
 
         # plot points
         x, y = m(lon_, lat_)
@@ -405,7 +429,7 @@ for tweetnum in range(0,args.maxtweets):
         label=''
         if sorted_countries[i]==input['country_'][0]:
             label+='*'
-        label+=hash.int2country(sorted_countries[i])
+        label+=myhash.int2country(sorted_countries[i])
         labels.append(label)
         val=output['country_softmax'][0,:][sorted_countries[i]]
         vals.append(val)
@@ -430,7 +454,7 @@ for tweetnum in range(0,args.maxtweets):
         label=''
         if sorted_langs[i]==input['lang_']:
             label+='*'
-        label+=hash.int2lang(sorted_langs[i])
+        label+=myhash.int2lang(sorted_langs[i])
         labels.append(label)
         val=output['lang_softmax'][0,:][sorted_langs[i]]
         vals.append(val)

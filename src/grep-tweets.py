@@ -33,12 +33,43 @@ german=[
     'das radio'
     ]
 
-queries=german
+klingon=[
+    "vjIjatlh",
+    "jlyaj",
+    "Hlja'",
+    "HiSlaH",
+    "ghobe'",
+    #"lu'",
+    #"luq",
+    #"Qo'",
+    ]
+
+dothraki=[
+    u'Me zisosh disse',
+    u'Hash yer ray tih',
+    u'Me achrae athnajaharoon',
+    u'Che dothras che drivos',
+    u'Ifas maisi yerit',
+    u'shekh ma shieraki anni',
+    '#conlang ',
+    'esperanto',
+    'klingon'
+    ]
+
+#latin=[
+    #"ardinalibus"
+    #"eorsum"
+
+mediterranean=['diterr']
+elconfidencial=['@elconfidencial']
+#muertos=['d\\u00eda de muertos','d\\u00eda de los muertos','D\\u00eda de Muertos','D\\u00eda de los Muertos','d\\u00edade','D\\u00edaDe']
+muertos=['de muertos','de Muertos','demuertos','DeMuertos']
+
+queries=dothraki
 
 import unicodedata
 standardize = lambda str: unicodedata.normalize('NFKC',unicode(str.lower()))
-
-queries = map(standardize,cities_japan)
+queries = map(standardize,queries)
 print('queries=',queries)
 
 ########################################
@@ -52,6 +83,7 @@ for path_date in os.listdir(args.data):
         for path_hour in os.listdir(path_date_full):
             files_all.append(os.path.join(path_date_full,path_hour))
 files_all.sort()
+files_all=list(reversed(files_all))
 
 # loop through files
 import simplejson as json

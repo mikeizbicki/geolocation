@@ -1,6 +1,6 @@
 import math
 import city_loc
-import hash
+import myhash
 
 tweetlen=280
 
@@ -12,7 +12,7 @@ def update_parser(parser):
     parser.add_argument('--optimizer',choices=['adam','sgd'],default='adam')
     parser.add_argument('--momentum',type=float,default=0.9)
     parser.add_argument('--decay',type=float,default=None)
-    parser.add_argument('--dropout',type=float,default=1)
+    parser.add_argument('--dropout',type=float,default=0.5)
     parser.add_argument('--l1',type=float,default=0.0)
     parser.add_argument('--l2',type=float,default=1e-5)
 
@@ -24,8 +24,13 @@ def update_parser(parser):
     parser.add_argument('--cnn_type',choices=['vdcnn','cltcc'],default='cltcc')
     parser.add_argument('--cnn_vocabsize',type=int,default=128)
     parser.add_argument('--cnn_khot',type=int,default=1)
+    parser.add_argument('--text_naive',type=bool,default=False)
+    parser.add_argument('--text_multichar_init_bit',type=bool,default=True)
+    parser.add_argument('--text_latin_bit',type=bool,default=True)
+    parser.add_argument('--text_transliterate',type=bool,default=True)
+    parser.add_argument('--text_hashsize_combiners',type=int,default=16)
     parser.add_argument('--vdcnn_numfilters',type=int,default=64)
-    parser.add_argument('--vdcnn_size',type=int,default=0)
+    parser.add_argument('--vdcnn_size',type=int,default=1)
     parser.add_argument('--vdcnn_resnet',action='store_true')
     parser.add_argument('--vdcnn_no_bn',action='store_true')
     parser.add_argument('--cltcc_numfilters',type=int,default=1024)
@@ -40,29 +45,30 @@ def update_parser(parser):
     parser.add_argument('--pos_loss',choices=['l2','chord','dist','dist_sqrt','dist2','angular'],default='dist')
     parser.add_argument('--pos_shortcut',choices=['lang','loc','country'],default=[],nargs='*')
     parser.add_argument('--pos_warmstart',type=bool,default=True)
-    parser.add_argument('--gmm_type',choices=['verysimple','simple','complex'],default='complex')
+    parser.add_argument('--gmm_type',choices=['verysimple','simple','complex'],default='verysimple')
     parser.add_argument('--gmm_distribution',choices=['fvm','gaussian','efam'],default='fvm')
     parser.add_argument('--gmm_lrfactor',type=float,default=1e-2)
     parser.add_argument('--gmm_notrain',action='store_true')
-    parser.add_argument('--gmm_components',type=int,default=1)
+    parser.add_argument('--gmm_components',type=int,default=10000)
     parser.add_argument('--gmm_prekappa0',type=float,default=10.0)
     parser.add_argument('--gmm_maxprob',type=float,default=None)
     parser.add_argument('--gmm_distloss',action='store_true')
     parser.add_argument('--gmm_decomposed',type=int,nargs='*',default=[])
     parser.add_argument('--country_shortcut',choices=['bow','lang'],default=[],nargs='*')
-    parser.add_argument('--loc_type',choices=['popular','hash'],default='hash')
+    parser.add_argument('--loc_type',choices=['popular','myhash'],default='myhash')
     parser.add_argument('--loc_filter',action='store_true')
     parser.add_argument('--loc_hashsize',type=int,default=16)
     parser.add_argument('--loc_bottleneck',type=int,default=None)
     parser.add_argument('--loc_shortcut',choices=['bow','lang','country'],default=[],nargs='*')
     parser.add_argument('--enable_shortcuts',action='store_true')
 
-    parser.add_argument('--predict_lang',type=bool,default=True)
-    parser.add_argument('--predict_lang_use',action='store_true')
+    parser.add_argument('--predict_lang',type=bool,default=False)
+    parser.add_argument('--predict_lang_use',type=bool,default=False)
     parser.add_argument('--predict_lang_layers',type=int,default=[1024,1024],nargs='*')
 
     parser.add_argument('--summary_size',choices=['small','med','all'],default='med')
     parser.add_argument('--summary_newusers',action='store_true')
+    parser.add_argument('--hashes_uniq',type=bool,default=True)
 
 ################################################################################
 
@@ -72,6 +78,10 @@ def inference(args,input_tensors):
     op_metrics={}
     op_outputs={}
     epsilon = 1e-6
+
+    if args.hashes_uniq:
+        myhash.langs=myhash.langs_uniq
+        myhash.country_codes=myhash.country_codes_uniq
 
     # preprocess args
     if args.enable_shortcuts:
@@ -104,27 +114,27 @@ def inference(args,input_tensors):
                 summary_langs=[]
                 summary_countries=[]
             elif args.summary_size=='med':
-                summary_langs=['en','ja','es','ar','fr','ko','zh','pt','tr','tl','in','und']
+                summary_langs=['en','ja','es','ar','fr','zh','pt','tr','tl','in','und','de','vi']
                 summary_countries=['US','MX','ES','FR','JP']
-            elif args.summary_size=='large':
-                summary_langs=hash.langs
-                summary_countries=hash.country_codes
+            elif args.summary_size=='all':
+                summary_langs=myhash.langs
+                summary_countries=myhash.country_codes
 
             for lang in summary_langs:
-                weights = tf.cast(tf.equal(input_tensors['lang_'],hash.lang2int(lang)),tf.float32)
+                weights = tf.cast(tf.equal(input_tensors['lang_'],myhash.lang2int(lang)),tf.float32)
                 weights = tf.reshape(weights,[args.batchsize])
                 mk_summary('filter_'+lang+'/',weights)
 
             for country in summary_countries:
-                weights = tf.cast(tf.equal(input_tensors['country_'],hash.country2int(country)),tf.float32)
+                weights = tf.cast(tf.equal(input_tensors['country_'],myhash.country2int(country)),tf.float32)
                 weights = tf.reshape(weights,[args.batchsize])
                 mk_summary('filter_'+country+'/',weights)
 
-            weights = tf.cast(tf.not_equal(input_tensors['lang_'],hash.lang2int('en')),tf.float32)
+            weights = tf.cast(tf.not_equal(input_tensors['lang_'],myhash.lang2int('en')),tf.float32)
             weights = tf.reshape(weights,[args.batchsize])
             mk_summary('all_minus_en/',weights)
 
-            weights = tf.cast(tf.not_equal(input_tensors['country_'],hash.country2int('US')),tf.float32)
+            weights = tf.cast(tf.not_equal(input_tensors['country_'],myhash.country2int('US')),tf.float32)
             weights = tf.reshape(weights,[args.batchsize])
             mk_summary('all_minus_us/',weights)
 
@@ -144,7 +154,7 @@ def inference(args,input_tensors):
 
         xentropy = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(
                 labels=tf.to_int64(tf.reshape(val_,[args.batchsize])),
-                logits=logits,
+                logits=logits+epsilon,
                 name='xentropy'
                 ))
         op_losses[valname+'_xentropy']=xentropy
@@ -187,7 +197,7 @@ def inference(args,input_tensors):
         regularizers=[]
         inputs=[]
 
-        # hash bow inputs
+        # myhash bow inputs
         if 'bow' in args.input:
             with tf.name_scope('bow'):
                 # FIXME: why does this need to be global?
@@ -402,8 +412,8 @@ def inference(args,input_tensors):
             if args.predict_lang:
                 with tf.name_scope('lang_predictor'):
                     final_layer= mk_full_layers(cnn_layer,args.predict_lang_layers)
-                    w = tf.Variable(tf.zeros([final_layer.get_shape()[1],len(hash.country_codes)]),name='w')
-                    b = tf.Variable(tf.zeros([len(hash.country_codes)]),name='b')
+                    w = tf.Variable(tf.zeros([final_layer.get_shape()[1],len(myhash.country_codes)]),name='w')
+                    b = tf.Variable(tf.zeros([len(myhash.country_codes)]),name='b')
                     logits = tf.matmul(final_layer,w)+b
                     lang_softmax=tf.nn.softmax(logits)
                     mk_xentropy_layer('lang',input_tensors['lang_'],logits)
@@ -414,7 +424,7 @@ def inference(args,input_tensors):
                 if args.predict_lang_use:
                     lang_one_hot=lang_softmax
                 else:
-                    lang_one_hot = tf.reshape(tf.one_hot(input_tensors['lang_'],len(hash.langs),axis=1),shape=[args.batchsize,len(hash.langs)])
+                    lang_one_hot = tf.reshape(tf.one_hot(input_tensors['lang_'],len(myhash.langs),axis=1),shape=[args.batchsize,len(myhash.langs)])
 
                 inputs.append(lang_one_hot)
 
@@ -465,8 +475,8 @@ def inference(args,input_tensors):
                         final_layer_country_size += args.bow_layersize
 
                 # layer
-                w = tf.Variable(tf.zeros([final_layer_country_size,len(hash.country_codes)]),name='w')
-                b = tf.Variable(tf.zeros([len(hash.country_codes)]),name='b')
+                w = tf.Variable(tf.zeros([final_layer_country_size,len(myhash.country_codes)]),name='w')
+                b = tf.Variable(tf.zeros([len(myhash.country_codes)]),name='b')
                 logits = tf.matmul(final_layer_country,w)+b
                 country_softmax=tf.nn.softmax(logits)
                 op_outputs['country_softmax']=country_softmax
@@ -475,7 +485,7 @@ def inference(args,input_tensors):
 
 
         # loc buckets
-        hash.init_loc_hash(args)
+        myhash.init_loc_hash(args)
         if 'loc' in args.output:
             #loc_ = tf.placeholder(tf.int64, [args.batchsize,1],name='loc_')
             loc_ = input_tensors['loc_']
@@ -503,12 +513,12 @@ def inference(args,input_tensors):
                 # layer
                 if args.loc_bottleneck:
                     w0 = tf.Variable(tf.zeros([final_layer_loc_size, args.loc_bottleneck]),name='w0')
-                    w1 = tf.Variable(tf.zeros([args.loc_bottleneck, hash.loc_max]),name='w1')
-                    b1 = tf.Variable(tf.zeros([hash.loc_max]),name='b1')
+                    w1 = tf.Variable(tf.zeros([args.loc_bottleneck, myhash.loc_max]),name='w1')
+                    b1 = tf.Variable(tf.zeros([myhash.loc_max]),name='b1')
                     logits = tf.matmul(final_layer_loc,tf.matmul(w0,w1))+b1
                 else:
-                    w1 = tf.Variable(tf.zeros([final_layer_loc_size, hash.loc_max]),name='w1')
-                    b1 = tf.Variable(tf.zeros([hash.loc_max]),name='b1')
+                    w1 = tf.Variable(tf.zeros([final_layer_loc_size, myhash.loc_max]),name='w1')
+                    b1 = tf.Variable(tf.zeros([myhash.loc_max]),name='b1')
                     logits = tf.matmul(final_layer_loc,w1)+b1
 
                 loc_softmax=tf.nn.softmax(logits)
@@ -538,7 +548,7 @@ def inference(args,input_tensors):
                 if 'loc' in args.pos_shortcut:
                     if 'loc' in args.output:
                         pos_final_layer = tf.concat([pos_final_layer,loc_softmax],axis=1)
-                        pos_final_layer_size += hash.loc_max
+                        pos_final_layer_size += myhash.loc_max
 
                 if 'country' in args.pos_shortcut:
                     if 'country' in args.output:
@@ -676,6 +686,7 @@ def inference(args,input_tensors):
                     elif args.gmm_distribution=='gaussian':
                         vecsum=tf.reduce_sum(tf.abs(x_reshape-mu)**2.0,axis=0)
                         log_likelihood_per_component = tf.exp(-kappa*vecsum)
+                        # FIXME: double exp
                     elif args.gmm_distribution=='efam':
                         pow_var = tf.Variable(tf.constant(0.1,shape=[args.gmm_components]),name='pow',trainable=True)
                         pow = tf.maximum(pow_var,1e-9)
@@ -777,7 +788,7 @@ def inference(args,input_tensors):
                     )
 
                 # radius of earth = 3959 miles, 6371 kilometers
-                op_dist = 2*6371*tf.asin(tf.sqrt(tf.maximum(epsilon,squared_angular_dist)))
+                op_dist = 2*6371*tf.asin(tf.sqrt(tf.maximum(0.0,squared_angular_dist)))
                 op_dist_ave = tf.reduce_sum(op_dist)/args.batchsize
 
                 op_delta_x = tf.cos(op_lat_rad)*tf.cos(op_lon_rad)-tf.cos(op_lat_rad_)*tf.cos(op_lon_rad_)
@@ -947,10 +958,10 @@ def json2dict(args,str):
         batch_dict['newuser_']=0
 
     # get hashes
-    batch_dict['lang_']=hash.lang2int(data['lang'])
+    batch_dict['lang_']=myhash.lang2int(data['lang'])
     #if 'country' in args.output:
     try:
-        country_code=hash.country2int(data['place']['country_code'])
+        country_code=myhash.country2int(data['place']['country_code'])
     except:
         country_code=0
     batch_dict['country_']=np.array([country_code])
@@ -962,11 +973,30 @@ def json2dict(args,str):
     if 'cnn' in args.input:
         encodedtext=np.zeros([1,tweetlen,args.cnn_vocabsize])
 
+        encodedtext_index=0
         for i in range(min(tweetlen,len(data['text']))):
-            for k in range(0,args.cnn_khot):
-                char=ord(data['text'][i])
-                index=(5381*char + 88499*k)%args.cnn_vocabsize
-                encodedtext[0][i][index]=1
+            #pass
+            bitmasks=myhash.unicode2bitmask(
+                data['text'][i],
+                hashsize=args.cnn_vocabsize,
+                naive=args.text_naive,
+                multichar_init_bit=args.text_multichar_init_bit,
+                latin_bit=args.text_latin_bit,
+                transliterate=args.text_transliterate,
+                hashsize_combiners=args.text_hashsize_combiners,
+                debug=False
+                )
+            for bitmask in bitmasks:
+                j=0
+                for bit in bitmask:
+                    if bit and encodedtext_index<tweetlen:
+                        encodedtext[0][encodedtext_index][j]=1
+                    j+=1
+                encodedtext_index+=1
+
+                #char=ord(data['text'][i])
+                #index=(5381*char + 88499*k)%args.cnn_vocabsize
+                #encodedtext[0][i][index]=1
 
         batch_dict['text_']=encodedtext
 
@@ -998,7 +1028,7 @@ def json2dict(args,str):
 
     if 'loc' in args.output:
         try:
-            loc_code=hash.loc2int(data['place']['full_name'])
+            loc_code=myhash.loc2int(data['place']['full_name'])
         except:
             loc_code=0
         batch_dict['loc_']=np.array([loc_code])

@@ -68,7 +68,7 @@ import tensorflow as tf
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 tf.set_random_seed(args.seed)
 
-import hash
+import myhash
 
 input_tensors={
     'country_' : tf.placeholder(tf.int64, [args.batchsize,1],name='country_'),
@@ -158,7 +158,7 @@ if args.tfdbg:
     sess.add_tensor_filter('my_filter', my_filter_callable)
 
 
-saver = tf.train.Saver(max_to_keep=100000)
+saver = tf.train.Saver(max_to_keep=10)
 if not args.no_checkpoint:
     for k,(v,_) in op_metrics.iteritems():
         tf.summary.scalar(k,v)
@@ -205,7 +205,7 @@ for path_date in os.listdir(args.data):
             files_all.append(os.path.join(path_date_full,path_hour))
 
 files_all.sort()
-files_all=files_all[:3000]
+#files_all=files_all[:3000]
 
 #files_train=[]
 #files_test=[]
@@ -248,6 +248,7 @@ def reset_stats_step():
     stats_step['validtweets']=0
     stats_step['start_time']=time.time()
     stats_step['decoding_time']=0
+    stats_step['decoding_time_model']=0
     stats_step['run_time']=0
     if not args.repeat_batch:
         stats_step['numlines']=0
@@ -261,76 +262,101 @@ open_files=[]
 random.seed(args.seed)
 np.random.seed(args.seed)
 
+# function that returns the next batch
+def mk_batch():
+    global files_remaining
+    batch=[]
+    while len(batch) < args.batchsize:
+
+        # load and decode next json entry
+        while len(open_files)<args.max_open_files and len(files_remaining)>0:
+            if args.data_style=='online':
+                index=0
+            else:
+                if args.data_sample == 'uniform':
+                    index=random.randrange(len(files_remaining))
+                elif args.data_sample == 'fancy':
+                    choices=3
+                    choice=np.random.randint(choices)+1
+                    index=random.randrange(1+int((choice/float(choices))*len(files_remaining)))
+                    print('index=',index)
+
+            filename=files_remaining[index]
+            files_remaining.pop(index)
+            try:
+                open_files.append(gzip.open(filename,'rt'))
+            except Exception as e:
+                print('gzip.open failed on ',filename,file=sys.stderr)
+                print(e,file=sys.stderr)
+                continue
+            print('  opening [%s]; files remaining: %d/%d; buffer state: %d/%d'%(
+                filename,
+                len(files_remaining),
+                len(files_all),
+                len(open_files),
+                args.max_open_files,
+                ))
+
+        if len(open_files)==0:
+            if args.data_style=='online':
+                print('done.')
+                sys.exit(0)
+            else:
+                stats_epoch['new']=True
+                stats_epoch['count']+=1
+                files_remaining=copy.deepcopy(files_all)
+                continue
+
+        index=random.randrange(len(open_files))
+        try:
+            nextline=open_files[index].readline()
+            if nextline=='':
+                raise ValueError('done')
+        except Exception as e:
+            open_files[index].close()
+            open_files.pop(index)
+            continue
+
+        if batch==[]:
+            print('nextline=',nextline)
+
+        #try:
+        if True:
+            decoding_time_model_start=time.time()
+            stats_step['numlines']+=1
+            data=model.json2dict(args,nextline)
+            batch.append(data)
+            stats_step['validtweets']+=1
+            decoding_time_model_stop=time.time()
+            stats_step['decoding_time_model']+=decoding_time_model_stop-decoding_time_model_start
+        #except Exception as e:
+            #print('current file=',open_files[index].name)
+            #print(e)
+            #continue
+
+    feed_dict=model.mk_feed_dict(args,batch)
+    return feed_dict
+
+# setup multiprocessing
+import multiprocessing as mp
+queue = mp.Queue()
+
+def mk_batches():
+    while True:
+        feed_dict=mk_batch()
+        queue.put(feed_dict)
+
+process=mp.Process(target=mk_batches)
+process.start()
+
+# loop through training data
 while True:
     stats_step['count']+=1
     stats_epoch['steps']+=1
 
+    decoding_time_start=time.time()
     if not args.repeat_batch or stats_step['count']==0:
-        decoding_time_start=time.time()
-        batch=[]
-        while len(batch) < args.batchsize:
-
-            # load and decode next json entry
-            while len(open_files)<args.max_open_files and len(files_remaining)>0:
-                if args.data_style=='online':
-                    index=0
-                else:
-                    if args.data_sample == 'uniform':
-                        index=random.randrange(len(files_remaining))
-                    elif args.data_sample == 'fancy':
-                        choices=3
-                        choice=np.random.randint(choices)+1
-                        index=random.randrange(1+int((choice/float(choices))*len(files_remaining)))
-                        print('index=',index)
-
-                filename=files_remaining[index]
-                files_remaining.pop(index)
-                try:
-                    open_files.append(gzip.open(filename,'rt'))
-                except Exception as e:
-                    print('gzip.open failed on ',filename,file=sys.stderr)
-                    print(e,file=sys.stderr)
-                    continue
-                print('  opening [%s]; files remaining: %d/%d; buffer state: %d/%d'%(
-                    filename,
-                    len(files_remaining),
-                    len(files_all),
-                    len(open_files),
-                    args.max_open_files,
-                    ))
-
-            if len(open_files)==0:
-                if args.data_style=='online':
-                    print('done.')
-                    sys.exit(0)
-                else:
-                    stats_epoch['new']=True
-                    stats_epoch['count']+=1
-                    files_remaining=copy.deepcopy(files_all)
-                    continue
-
-            index=random.randrange(len(open_files))
-            try:
-                nextline=open_files[index].readline()
-                if nextline=='':
-                    raise ValueError('done')
-            except Exception as e:
-                open_files[index].close()
-                open_files.pop(index)
-                continue
-
-            #try:
-            if True:
-                stats_step['numlines']+=1
-                data=model.json2dict(args,nextline)
-                batch.append(data)
-                stats_step['validtweets']+=1
-            #except Exception as e:
-                #print('current file=',open_files[index].name)
-                #print(e)
-                #continue
-
-    feed_dict=model.mk_feed_dict(args,batch)
+        feed_dict=queue.get() #mk_batch()
     decoding_time_stop=time.time()
     stats_step['decoding_time']+=decoding_time_stop-decoding_time_start
     stats_epoch['decoding_time']+=decoding_time_stop-decoding_time_start
@@ -349,14 +375,13 @@ while True:
        (stats_step['count'] < 1000 and stats_step['count']%10 == 0) or
        (stats_step['count'] < 10000 and stats_step['count']%100 == 0) or
        (stats_step['count']%1000 == 0)):
-        output='  %8d/%4d: good=%1.2f  dec=%1.2f  run=%1.2f  locs=%d/%d' % (
+        output='  %8d/%4d: good=%1.2f  dec=%1.2f  dec_m=%1.2f run=%1.2f' % (
               stats_step['count']
             , stats_epoch['count']
-            , stats_step['validtweets']/float(stats_step['numlines'])
+            , 0.0 #stats_step['validtweets']/float(stats_step['numlines'])
             , stats_step['decoding_time']/float(time.time()-stats_step['start_time'])
+            , stats_step['decoding_time_model']/float(time.time()-stats_step['start_time'])
             , stats_step['run_time']/float(time.time()-stats_step['start_time'])
-            , hash.loc_count
-            , hash.loc_max
             )
         print(datetime.datetime.now(),output)
 
