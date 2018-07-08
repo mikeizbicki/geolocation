@@ -317,8 +317,8 @@ def mk_batch():
             open_files.pop(index)
             continue
 
-        if batch==[]:
-            print('nextline=',nextline)
+        #if batch==[]:
+            #print('nextline=',nextline)
 
         #try:
         if True:
@@ -339,7 +339,7 @@ def mk_batch():
 
 # setup multiprocessing
 import multiprocessing as mp
-queue = mp.Queue()
+queue = mp.Queue(maxsize=5)
 
 def mk_batches():
     while True:

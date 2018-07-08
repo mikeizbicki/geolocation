@@ -805,6 +805,8 @@ def inference(args,input_tensors):
                     op_loss = op_dist_ave
                 if args.pos_loss=='dist2':
                     op_loss = tf.reduce_sum(op_dist*op_dist)/args.batchsize
+                if args.pos_loss=='dist_sqrt':
+                    op_loss = tf.reduce_sum(tf.sqrt(op_dist))/args.batchsize
                 if args.pos_loss=='angular':
                     op_loss = tf.reduce_sum(squared_angular_dist)
 
