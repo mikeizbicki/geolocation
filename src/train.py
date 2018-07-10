@@ -25,7 +25,7 @@ parser.add_argument('--repeat_batch',action='store_true')
 parser.add_argument('--tfdbg',action='store_true')
 
 # model hyperparameters
-parser.add_argument('--data',type=str,required=True)
+parser.add_argument('--data',type=str)
 parser.add_argument('--data_summary',type=str,default=None)
 parser.add_argument('--data_sample',choices=['uniform','fancy'],default='uniform')
 parser.add_argument('--data_style',choices=['online','batch'],default='batch')
@@ -40,6 +40,30 @@ args = parser.parse_args()
 
 if args.data_style=='online':
     args.max_open_files=1
+
+# load arguments from file if applicable
+if args.initial_weights:
+    print('  loading arguments from %s/args.json'%args.initial_weights)
+    import simplejson as json
+    with open(args.initial_weights+'/args.json','r') as f:
+        args_str=f.readline()
+    #class MyNamespace(object):
+        #def __init__(self, adict):
+            #self.__dict__.update(adict)
+    #print('args=',args)
+
+    args=argparse.Namespace(**json.loads(args_str))
+
+    #print()
+    #print('args=',args)
+
+    args=parser.parse_args(namespace=args)
+
+    #print()
+    #print('args=',args)
+
+    #import sys
+    #sys.exit(1)
 
 print('args=',args)
 
@@ -174,7 +198,9 @@ sess.run(reset_local_vars)
 if args.initial_weights:
     # see https://stackoverflow.com/questions/41621071/restore-subset-of-variables-in-tensorflow
     print('restoring model')
-    reader = tf.pywrap_tensorflow.NewCheckpointReader(args.initial_weights)
+    chkpt_file=tf.train.latest_checkpoint(args.initial_weights)
+    print('  chkpt_file=',chkpt_file)
+    reader = tf.pywrap_tensorflow.NewCheckpointReader(chkpt_file)
     var_to_shape_map = reader.get_variable_to_shape_map()
     var_dict={}
     for k in sorted(var_to_shape_map):
@@ -188,7 +214,8 @@ if args.initial_weights:
             pass
     #print('  restored_vars=',var_dict)
     loader = tf.train.Saver(var_dict)
-    loader.restore(sess, args.initial_weights)
+    loader.restore(sess, chkpt_file)
+    #loader.restore(sess, args.initial_weights)
     #saver.restore(sess,args.initial_weights)
     print('  model restored from ',args.initial_weights)
 
