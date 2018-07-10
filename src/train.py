@@ -47,23 +47,9 @@ if args.initial_weights:
     import simplejson as json
     with open(args.initial_weights+'/args.json','r') as f:
         args_str=f.readline()
-    #class MyNamespace(object):
-        #def __init__(self, adict):
-            #self.__dict__.update(adict)
-    #print('args=',args)
 
     args=argparse.Namespace(**json.loads(args_str))
-
-    #print()
-    #print('args=',args)
-
     args=parser.parse_args(namespace=args)
-
-    #print()
-    #print('args=',args)
-
-    #import sys
-    #sys.exit(1)
 
 print('args=',args)
 
@@ -106,6 +92,7 @@ input_tensors={
 }
 
 op_metrics,op_loss_regularized,op_losses,op_outputs = model.inference(args,input_tensors)
+op_summaries=model.metrics2summaries(args,op_metrics)
 
 # optimization nodes
 with tf.name_scope('optimization'):
@@ -184,7 +171,7 @@ if args.tfdbg:
 
 saver = tf.train.Saver(max_to_keep=10)
 if not args.no_checkpoint:
-    for k,(v,_) in op_metrics.iteritems():
+    for k,(v,_) in op_summaries.iteritems():
         tf.summary.scalar(k,v)
     summary = tf.summary.merge_all()
     summary_writer = tf.summary.FileWriter(log_dir+'/train', sess.graph)
@@ -366,7 +353,7 @@ def mk_batch():
 
 # setup multiprocessing
 import multiprocessing as mp
-queue = mp.Queue(maxsize=5)
+queue = mp.Queue(maxsize=20)
 
 def mk_batches():
     while True:
@@ -391,7 +378,7 @@ while True:
     # run the model
     run_time_start=time.time()
     _, metrics = sess.run(
-        [ train_op, op_metrics ]
+        [ train_op, op_summaries ]
         , feed_dict=feed_dict
         )
     run_time_stop=time.time()

@@ -158,7 +158,7 @@ def inference(args,input_tensors):
                 name='xentropy'
                 ))
         op_losses[valname+'_xentropy']=xentropy
-        op_metrics['optimization/'+valname+'_xentropy']=tf.contrib.metrics.streaming_mean(xentropy,name=valname+'_xentropy')
+        op_metrics['optimization/'+valname+'_xentropy']=(args.batchsize,xentropy)
 
         val=tf.reshape(tf.argmax(logits,axis=1),shape=[args.batchsize,1])
 
@@ -172,9 +172,10 @@ def inference(args,input_tensors):
                 )
             total_weights=tf.reduce_sum(weights)
             xentropy = tf.cond(total_weights>0,lambda: xentropy_sum/total_weights,lambda: 0.0)
-            op_metrics[groupname+valname+'_xentropy']=tf.contrib.metrics.streaming_mean(xentropy,name=groupname+valname+'_xentropy',weights=total_weights)
+            op_metrics[groupname+valname+'_xentropy']=(total_weights,xentropy)
 
-            op_metrics[groupname+valname+'_acc']=tf.contrib.metrics.streaming_accuracy(val,val_,weights=weights,name=groupname+valname+'_acc')
+            accuracy=tf.metrics.accuracy(val,val_,weights=weights)
+            op_metrics[groupname+valname+'_acc']=(total_weights,accuracy)
         make_summaries(mk_metric)
 
     # helper for defining fully connected layers
@@ -700,7 +701,7 @@ def inference(args,input_tensors):
                     log_loss = - tf.log(likelihood_mixed + epsilon)
                     loss=tf.reduce_mean(log_loss,name='dbgloss')
                     op_losses['pos_loss_mix']=loss
-                    op_metrics['optimization/aglm_mix']=tf.contrib.metrics.streaming_mean(loss,name='aglm_mix')
+                    op_metrics['optimization/aglm_mix']=(args.batchsize,loss)
 
                     with tf.name_scope('summaries'):
                         vals,indices=tf.nn.top_k(mixture,k=args.gmm_components)
@@ -708,18 +709,9 @@ def inference(args,input_tensors):
 
                         def summarize_vector(v,n):
                             with tf.name_scope(n):
-                                op_metrics['mix/'+n+'/max']=tf.contrib.metrics.streaming_mean(
-                                    tf.reduce_max(v),
-                                    name=n+'_max'
-                                    )
-                                op_metrics['mix/'+n+'/min']=tf.contrib.metrics.streaming_mean(
-                                    tf.reduce_min(v),
-                                    name=n+'_min'
-                                    )
-                                op_metrics['mix/'+n+'/mean']=tf.contrib.metrics.streaming_mean(
-                                    tf.reduce_mean(v),
-                                    name=n+'_mean'
-                                    )
+                                op_metrics['mix/'+n+'/max']=tf.reduce_max(v)
+                                op_metrics['mix/'+n+'/min']=tf.reduce_min(v)
+                                op_metrics['mix/'+n+'/mean']=tf.reduce_mean(v)
 
                         summarize_vector(pre_kappa,'pre_kappa')
                         summarize_vector(logits,'logits')
@@ -729,28 +721,15 @@ def inference(args,input_tensors):
                         except:
                             pass
 
-                        op_metrics['mix/sum']=tf.contrib.metrics.streaming_mean(mixture_sum,name='mixture_sum')
+                        op_metrics['mix/sum']=mixture_sum
 
-                        #pre_kappa_max=tf.reduce_max(pre_kappa)
-                        #op_metrics['mix/pre_kappa_max']=tf.contrib.metrics.streaming_mean(pre_kappa_max,name='pre_kappa_max')
-                        #pre_kappa_min=tf.reduce_min(pre_kappa)
-                        #op_metrics['mix/pre_kappa_min']=tf.contrib.metrics.streaming_mean(pre_kappa_min,name='pre_kappa_min')
-                        #logits_max=tf.reduce_mean(tf.reduce_max(mixture_logits,axis=1))
-                        #op_metrics['mix/logits_max']=tf.contrib.metrics.streaming_mean(logits_max,name='logits_max')
-                        #logits_min=tf.reduce_mean(tf.reduce_min(mixture_logits,axis=1))
-                        #op_metrics['mix/logits_min']=tf.contrib.metrics.streaming_mean(logits_min,name='logits_min')
-                        #w_max=tf.reduce_max(w)
-                        #op_metrics['mix/w_max']=tf.contrib.metrics.streaming_mean(logits_max,name='w_max')
-                        #w_min=tf.reduce_min(w)
-                        #op_metrics['mix/w_min']=tf.contrib.metrics.streaming_mean(logits_min,name='w_min')
                         for k in [0,1,2]:
                             topk=vals[:,min(k,args.gmm_components-1)]
-                            op_metrics['mix/top'+str(k)+'_loss']=tf.contrib.metrics.streaming_mean(topk,name='topk_'+str(k))
+                            op_metrics['mix/top'+str(k)+'_loss']=topk
                         for p in [0.0,0.25,0.50,0.75]:
                             topp=vals[:,int((1.0-p)*args.gmm_components)-1]
-                            op_metrics['mix/percentile_'+str(p)]=tf.contrib.metrics.streaming_mean(topp,name='topp_'+str(p))
+                            op_metrics['mix/percentile_'+str(p)]=topp
 
-                    #main_component=tf.nn.softmax(mixture) #,axis=1)
                     main_component=mixture
                     main_component=tf.where(
                             tf.equal(tf.reduce_max(mixture, axis=1, keep_dims=True), mixture),
@@ -812,7 +791,7 @@ def inference(args,input_tensors):
 
                 if not args.pos_type=='aglm_mix' or args.gmm_distloss:
                     op_losses['pos_loss']=op_loss/1000
-                op_metrics['optimization/dist']=tf.contrib.metrics.streaming_mean(op_dist_ave,name='dist')
+                op_metrics['optimization/dist']=op_dist_ave
 
                 def mk_metric(basename,weights):
                     total_weights = tf.reduce_sum(weights)
@@ -820,7 +799,7 @@ def inference(args,input_tensors):
                         lambda: tf.reduce_sum(weights*op_dist)/total_weights,
                         lambda: 0.0
                         )
-                    op_metrics[basename+'dist']=tf.contrib.metrics.streaming_mean(op_dist_ave,weights=total_weights+1e-6,name='dist')
+                    op_metrics[basename+'dist']=(total_weights,op_dist_ave)
                     def mk_threshold(threshold):
                         op_threshold = tf.sign(op_dist-threshold)/2+0.5
                         op_threshold_ave = tf.cond(total_weights>0,
@@ -828,7 +807,7 @@ def inference(args,input_tensors):
                             lambda: 0.0
                             )
                         name=basename+'k'+str(threshold)
-                        op_metrics[name]=tf.contrib.metrics.streaming_mean(op_threshold_ave,weights=total_weights+1e-6,name=name)
+                        op_metrics[name]=(weights,op_threshold_ave)
                     mk_threshold(10)
                     mk_threshold(50)
                     mk_threshold(100)
@@ -898,7 +877,7 @@ def inference(args,input_tensors):
         if args.predict_lang:
             op_loss += op_losses['lang_xentropy']
 
-        op_metrics['optimization/op_loss']=tf.contrib.metrics.streaming_mean(op_loss,name='op_loss')
+        op_metrics['optimization/op_loss']=op_loss
 
         # add regularizers
         with tf.name_scope('l2_regularization'):
@@ -910,6 +889,22 @@ def inference(args,input_tensors):
         op_losses['optimization/op_loss_regularized']=op_loss_regularized
 
         return op_metrics,op_loss_regularized,op_losses,op_outputs
+
+########################################
+
+def metrics2summaries(args,op_metrics):
+    import tensorflow as tf
+    summaries={}
+    with tf.name_scope('streaming_mean'):
+        for k,v in op_metrics.iteritems():
+            try:
+                (weights,metric)=v
+                metric *= weights/float(args.batchsize)
+            except:
+                metric=v
+            summaries[k]=tf.contrib.metrics.streaming_mean(metric,name=k)
+    return summaries
+
 
 ################################################################################
 
