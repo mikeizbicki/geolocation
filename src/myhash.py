@@ -158,6 +158,8 @@ langs=[u'unknown']+langs_emperical+langs_iso_639_1
 langs_uniq=list(set(langs))
 #langs=langs_uniq
 
+langs_true=['am','ar','bg','bn','bo','ckb','cs','cy','da','de','dv','el','en','es','et','eu','fa','fi','fr','gu','hi','ht','hu','hy','in','is','it','iw','ja','ka','km','kn','ko','lo','lt','lv','ml','mr','my','ne','nl','no','or','pa','pl','ps','pt','ro','ru','sd','si','sl','sr','sv','ta','te','th','tl','tr','ug','uk','und','ur','vi','zh','ca']
+
 def lang2int(lang):
     try:
         return langs.index(lang)
@@ -166,7 +168,10 @@ def lang2int(lang):
         return 0
 
 def int2lang(i):
-    return langs[i]
+    try:
+        return langs[i]
+    except:
+        return langs['und']
 
 def softmax2lang(x):
     import numpy as np

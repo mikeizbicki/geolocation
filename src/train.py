@@ -78,21 +78,58 @@ import tensorflow as tf
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 tf.set_random_seed(args.seed)
 
-import myhash
+# get cuda devices
+#cuda_devices=['0']
+cuda_devices=os.environ['CUDA_VISIBLE_DEVICES'].split(',')
+num_devices=float(len(cuda_devices))
+print('cuda_devices=',cuda_devices)
 
-input_tensors={
-    'country_' : tf.placeholder(tf.int64, [args.batchsize,1],name='country_'),
-    'text_' : tf.placeholder(tf.float32, [args.batchsize,model.tweetlen,args.cnn_vocabsize],name='text_'),
-    'gps_' : tf.placeholder(tf.float32, [args.batchsize,2], name='gps_'),
-    'loc_' : tf.placeholder(tf.int64, [args.batchsize,1],name='loc_'),
-    'timestamp_ms_' : tf.placeholder(tf.float32, [args.batchsize,1], name='timestamp_ms_'),
-    'lang_' : tf.placeholder(tf.int32, [args.batchsize,1], 'lang_'),
-    'newuser_' : tf.placeholder(tf.float32, [args.batchsize,1],name='newuser_'),
-    'hash_' : tf.sparse_placeholder(tf.float32,name='hash_'),
-}
+# generate model on each device
+device_inputs={}
+device_metrics={}
+device_loss_reg={}
 
-op_metrics,op_loss_regularized,op_losses,op_outputs = model.inference(args,input_tensors)
-op_summaries=model.metrics2summaries(args,op_metrics)
+for device in cuda_devices:
+    with tf.device("/device:GPU:"+device):
+        with tf.name_scope('input'+device):
+            device_inputs[device]={
+                'country_' : tf.placeholder(tf.int64, [args.batchsize,1],name='country_'),
+                'text_' : tf.placeholder(tf.float32, [args.batchsize,model.tweetlen,args.cnn_vocabsize],name='text_'),
+                'gps_' : tf.placeholder(tf.float32, [args.batchsize,2], name='gps_'),
+                'loc_' : tf.placeholder(tf.int64, [args.batchsize,1],name='loc_'),
+                'timestamp_ms_' : tf.placeholder(tf.float32, [args.batchsize,1], name='timestamp_ms_'),
+                'lang_' : tf.placeholder(tf.int32, [args.batchsize,1], 'lang_'),
+                'newuser_' : tf.placeholder(tf.float32, [args.batchsize,1],name='newuser_'),
+                'hash_' : tf.sparse_placeholder(tf.float32,name='hash_'),
+            }
+        device_metrics[device],device_loss_reg[device],op_losses,op_outputs = model.inference(
+            args,
+            device_inputs[device]
+            )
+
+# combine losses from each device
+with tf.name_scope('merge_losses'):
+    op_loss_regularized=sum(device_loss_reg.values())/num_devices
+
+# combine summaries
+with tf.name_scope('summaries'):
+    metrics={}
+    for k in device_metrics[cuda_devices[0]].keys():
+        metric=[]
+        for device in cuda_devices:
+            metric.append(device_metrics[device][k])
+        try:
+            w_total=0
+            metric_tmp=[]
+            for (w,v) in metric:
+                w_total+=w
+            for (w,v) in metric:
+                metric_tmp.append((w/w_total)*v)
+            metric=metric_tmp
+        except:
+            metric=map(lambda x:x/num_devices,metric)
+        metrics[k]=sum(metric)
+    op_summaries=model.metrics2summaries(args,metrics)
 
 # optimization nodes
 with tf.name_scope('optimization'):
@@ -113,9 +150,15 @@ with tf.name_scope('optimization'):
         optimizer = tf.train.MomentumOptimizer(learningrate,args.momentum)
     #train_op = optimizer.minimize(op_loss_regularized, global_step=global_step)
 
-    gradients, variables = zip(*optimizer.compute_gradients(op_loss_regularized))
+    gradients, variables = zip(*optimizer.compute_gradients(
+        op_loss_regularized,
+        colocate_gradients_with_ops=True,
+        ))
     gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
-    train_op = optimizer.apply_gradients(zip(gradients, variables), global_step=global_step)
+    train_op = optimizer.apply_gradients(
+        zip(gradients, variables),
+        global_step=global_step
+        )
 
 ########################################
 print('preparing logging')
@@ -334,8 +377,8 @@ def mk_batch():
         #if batch==[]:
             #print('nextline=',nextline)
 
-        #try:
-        if True:
+        try:
+        #if True:
             decoding_time_model_start=time.time()
             stats_step['numlines']+=1
             data=model.json2dict(args,nextline)
@@ -343,9 +386,11 @@ def mk_batch():
             stats_step['validtweets']+=1
             decoding_time_model_stop=time.time()
             stats_step['decoding_time_model']+=decoding_time_model_stop-decoding_time_model_start
-        #except Exception as e:
+        except Exception as e:
+            #pass
             #print('current file=',open_files[index].name)
-            #print(e)
+            if str(e)!="'text'":
+                print(e)
             #continue
 
     feed_dict=model.mk_feed_dict(args,batch)
@@ -370,7 +415,12 @@ while True:
 
     decoding_time_start=time.time()
     if not args.repeat_batch or stats_step['count']==0:
-        feed_dict=queue.get() #mk_batch()
+        feed_dict={}
+        for device in cuda_devices:
+            device_dict=queue.get()
+            for k,v in device_dict.iteritems():
+                feed_dict['input'+device+'/'+k]=v
+        #raise ValueError('poop')
     decoding_time_stop=time.time()
     stats_step['decoding_time']+=decoding_time_stop-decoding_time_start
     stats_epoch['decoding_time']+=decoding_time_stop-decoding_time_start
@@ -406,7 +456,7 @@ while True:
         # save summaries if not debugging
         if not args.no_checkpoint:
             summary_str = sess.run(summary, feed_dict=feed_dict)
-            summary_writer.add_summary(summary_str, stats_step['count']*args.batchsize)
+            summary_writer.add_summary(summary_str, stats_step['count']*args.batchsize*num_devices)
             summary_writer.flush()
 
         # save model if not debugging

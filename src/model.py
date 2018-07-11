@@ -37,6 +37,7 @@ def update_parser(parser):
     parser.add_argument('--cltcc_variance',type=float,default=0.02)
 
     parser.add_argument('--full',type=int,nargs='*',default=[2048,2048])
+    parser.add_argument('--full_per_lang',action='store_true')
 
     parser.add_argument('--output',choices=['pos','country','loc'],default=['pos','country'],nargs='*')
     parser.add_argument('--loss_weights',choices=['auto','ave','manual','manual2','manual3','prod'],default='ave')
@@ -69,6 +70,7 @@ def update_parser(parser):
     parser.add_argument('--summary_size',choices=['small','med','all'],default='med')
     parser.add_argument('--summary_newusers',action='store_true')
     parser.add_argument('--hashes_uniq',type=bool,default=True)
+    parser.add_argument('--hashes_true',type=bool,default=True)
 
 ################################################################################
 
@@ -79,9 +81,13 @@ def inference(args,input_tensors):
     op_outputs={}
     epsilon = 1e-6
 
+    # adjust hash functions for backwards compatibility
     if args.hashes_uniq:
         myhash.langs=myhash.langs_uniq
         myhash.country_codes=myhash.country_codes_uniq
+
+    if args.hashes_true:
+        myhash.langs=myhash.langs_true
 
     # preprocess args
     if args.enable_shortcuts:
@@ -452,8 +458,30 @@ def inference(args,input_tensors):
     # fully connected hidden layers
     with tf.name_scope('full'):
         final_layer=tf.concat(map(tf.contrib.layers.flatten,inputs),axis=1)
-        final_layer=mk_full_layers(final_layer, args.full)
         final_layer_size=int(final_layer.get_shape()[1])
+        if args.full_per_lang:
+            layersize=1024
+            with tf.name_scope('full0'):
+                w = tf.Variable(var_init([len(myhash.langs),final_layer_size,layersize]),name='w')
+                b = tf.Variable(tf.constant(0.1,shape=[len(myhash.langs),layersize]),name='b')
+                final_layer = tf.tensordot(final_layer,w,axes=[[1],[1]])+b
+                final_layer = tf.nn.relu(final_layer)
+                final_layer = tf.nn.dropout(final_layer,args.dropout)
+                final_layer = final_layer*tf.reshape(lang_one_hot,[args.batchsize,len(myhash.langs),1])
+                final_layer = tf.reduce_sum(final_layer,axis=1)
+            with tf.name_scope('full1'):
+                w = tf.Variable(var_init([len(myhash.langs),layersize,layersize]),name='w')
+                b = tf.Variable(tf.constant(0.1,shape=[len(myhash.langs),layersize]),name='b')
+                final_layer = tf.tensordot(final_layer,w,axes=[[1],[1]])+b
+                final_layer = tf.nn.relu(final_layer)
+                final_layer = tf.nn.dropout(final_layer,args.dropout)
+                final_layer = final_layer*tf.reshape(lang_one_hot,[args.batchsize,len(myhash.langs),1])
+                final_layer = tf.reduce_sum(final_layer,axis=1)
+
+            final_layer_size=layersize
+        else:
+            final_layer=mk_full_layers(final_layer, args.full)
+            final_layer_size=int(final_layer.get_shape()[1])
 
     # rf outputs
     with tf.name_scope('output'):
@@ -899,7 +927,7 @@ def metrics2summaries(args,op_metrics):
         for k,v in op_metrics.iteritems():
             try:
                 (weights,metric)=v
-                metric *= weights/float(args.batchsize)
+                #metric *= weights/float(args.batchsize)
             except:
                 metric=v
             summaries[k]=tf.contrib.metrics.streaming_mean(metric,name=k)
@@ -956,7 +984,6 @@ def json2dict(args,str):
 
     # get hashes
     batch_dict['lang_']=myhash.lang2int(data['lang'])
-    #if 'country' in args.output:
     try:
         country_code=myhash.country2int(data['place']['country_code'])
     except:
