@@ -70,7 +70,7 @@ def update_parser(parser):
     parser.add_argument('--summary_size',choices=['small','med','all'],default='med')
     parser.add_argument('--summary_newusers',action='store_true')
     parser.add_argument('--hashes_uniq',type=bool,default=True)
-    parser.add_argument('--hashes_true',type=bool,default=True)
+    parser.add_argument('--hashes_true',type=bool,default=False)
 
 ################################################################################
 

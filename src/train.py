@@ -232,19 +232,37 @@ if args.initial_weights:
     print('  chkpt_file=',chkpt_file)
     reader = tf.pywrap_tensorflow.NewCheckpointReader(chkpt_file)
     var_to_shape_map = reader.get_variable_to_shape_map()
-    var_dict={}
-    for k in sorted(var_to_shape_map):
-        try:
-            var=tf.get_default_graph().get_tensor_by_name(k+":0")
-            if var.get_shape() == var_to_shape_map[k]:
-                var_dict[k]=var
-            else:
-                print('  not restoring',k,'; old=',var_to_shape_map[k],'; new=',var.get_shape())
-        except:
-            pass
+
+    def restore(suffix):
+        var_dict={}
+        for k in sorted(var_to_shape_map):
+            ksplits=k.split('/')
+            if ksplits[0][-2] == '_':
+                continue
+            try:
+                k0=ksplits[0]+suffix
+                k2='/'.join([k0]+ksplits[1:])
+                var=tf.get_default_graph().get_tensor_by_name(k2+":0")
+                if var.get_shape() == var_to_shape_map[k]:
+                    var_dict[k]=var
+                else:
+                    print('  not restoring',k,'; old=',var_to_shape_map[k],'; new=',var.get_shape())
+            except:
+                pass
+        loader = tf.train.Saver(var_dict)
+        loader.restore(sess, chkpt_file)
+
+    restore('')
+    for i in range(1,len(cuda_devices)):
+        restore('_'+str(i))
+
+    #print('vars=',tf.trainable_variables())
+    #for var in tf.trainable_variables():
+        #print('var=',var)
+    #raise ValueError('poop')
     #print('  restored_vars=',var_dict)
-    loader = tf.train.Saver(var_dict)
-    loader.restore(sess, chkpt_file)
+    #loader = tf.train.Saver(var_dict)
+    #loader.restore(sess, chkpt_file)
     #loader.restore(sess, args.initial_weights)
     #saver.restore(sess,args.initial_weights)
     print('  model restored from ',args.initial_weights)
