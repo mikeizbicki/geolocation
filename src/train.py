@@ -88,10 +88,12 @@ print('cuda_devices=',cuda_devices)
 device_inputs={}
 device_metrics={}
 device_loss_reg={}
+device_grads={}
 
+reuse_variables=False
 for device in cuda_devices:
     with tf.device("/device:GPU:"+device):
-        with tf.name_scope('input'+device):
+        with tf.variable_scope('input'+device):
             device_inputs[device]={
                 'country_' : tf.placeholder(tf.int64, [args.batchsize,1],name='country_'),
                 'text_' : tf.placeholder(tf.float32, [args.batchsize,model.tweetlen,args.cnn_vocabsize],name='text_'),
@@ -104,15 +106,80 @@ for device in cuda_devices:
             }
         device_metrics[device],device_loss_reg[device],op_losses,op_outputs = model.inference(
             args,
-            device_inputs[device]
+            device_inputs[device],
+            reuse_variables
             )
+        reuse_variables=True
+        with tf.variable_scope('optimization'):
+            global_step = tf.Variable(0, name='global_step', trainable=False)
+            if args.decay is None:
+                learningrate = args.learningrate
+            else:
+                learningrate = tf.train.inverse_time_decay(
+                    args.learningrate,
+                    global_step,
+                    args.decay,
+                    1.0,
+                    staircase=args.loss_staircase)
+            tf.summary.scalar('learningrate',learningrate)
+            if args.optimizer=='adam':
+                optimizer = tf.train.AdamOptimizer(learningrate)
+            elif args.optimizer=='sgd':
+                optimizer = tf.train.MomentumOptimizer(learningrate,args.momentum)
 
-# combine losses from each device
-with tf.name_scope('merge_losses'):
-    op_loss_regularized=sum(device_loss_reg.values())/num_devices
+            #gradients, variables = zip(*optimizer.compute_gradients(
+                #op_loss_regularized,
+                ##colocate_gradients_with_ops=True,
+                #))
+            #gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
+            device_grads[device]=(optimizer.compute_gradients(device_loss_reg[device]))
+
+# combine gradients from each device
+# see: https://github.com/petewarden/tensorflow_makefile/blob/master/tensorflow/models/image/cifar10/cifar10_multi_gpu_train.py
+def average_gradients(tower_grads):
+    """Calculate the average gradient for each shared variable across all towers.
+    Note that this function provides a synchronization point across all towers.
+    Args:
+      tower_grads: List of lists of (gradient, variable) tuples. The outer list
+        is over individual gradients. The inner list is over the gradient
+        calculation for each tower.
+    Returns:
+       List of pairs of (gradient, variable) where the gradient has been averaged
+       across all towers.
+    """
+    average_grads = []
+    for grad_and_vars in zip(*tower_grads):
+        # Note that each grad_and_vars looks like the following:
+        #   ((grad0_gpu0, var0_gpu0), ... , (grad0_gpuN, var0_gpuN))
+        grads = []
+        for g, _ in grad_and_vars:
+          # Add 0 dimension to the gradients to represent the tower.
+          expanded_g = tf.expand_dims(g, 0)
+
+          # Append on a 'tower' dimension which we will average over below.
+          grads.append(expanded_g)
+
+        # Average over the 'tower' dimension.
+        grad = tf.concat(grads,0)
+        grad = tf.reduce_mean(grad, 0)
+
+        # Keep in mind that the Variables are redundant because they are shared
+        # across towers. So .. we will just return the first tower's pointer to
+        # the Variable.
+        v = grad_and_vars[0][1]
+        grad_and_var = (grad, v)
+        average_grads.append(grad_and_var)
+    return average_grads
+
+with tf.variable_scope('merge_losses'):
+    grads = average_gradients(device_grads.values())
+    train_op = optimizer.apply_gradients(
+        grads,
+        global_step=global_step
+        )
 
 # combine summaries
-with tf.name_scope('summaries'):
+with tf.variable_scope('summaries'):
     metrics={}
     for k in device_metrics[cuda_devices[0]].keys():
         metric=[]
@@ -132,33 +199,33 @@ with tf.name_scope('summaries'):
     op_summaries=model.metrics2summaries(args,metrics)
 
 # optimization nodes
-with tf.name_scope('optimization'):
-    global_step = tf.Variable(0, name='global_step', trainable=False)
-    if args.decay is None:
-        learningrate = args.learningrate
-    else:
-        learningrate = tf.train.inverse_time_decay(
-            args.learningrate,
-            global_step,
-            args.decay,
-            1.0,
-            staircase=args.loss_staircase)
-    tf.summary.scalar('learningrate',learningrate)
-    if args.optimizer=='adam':
-        optimizer = tf.train.AdamOptimizer(learningrate)
-    elif args.optimizer=='sgd':
-        optimizer = tf.train.MomentumOptimizer(learningrate,args.momentum)
-    #train_op = optimizer.minimize(op_loss_regularized, global_step=global_step)
-
-    gradients, variables = zip(*optimizer.compute_gradients(
-        op_loss_regularized,
-        colocate_gradients_with_ops=True,
-        ))
-    gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
-    train_op = optimizer.apply_gradients(
-        zip(gradients, variables),
-        global_step=global_step
-        )
+#with tf.variable_scope('optimization'):
+    #global_step = tf.Variable(0, name='global_step', trainable=False)
+    #if args.decay is None:
+        #learningrate = args.learningrate
+    #else:
+        #learningrate = tf.train.inverse_time_decay(
+            #args.learningrate,
+            #global_step,
+            #args.decay,
+            #1.0,
+            #staircase=args.loss_staircase)
+    #tf.summary.scalar('learningrate',learningrate)
+    #if args.optimizer=='adam':
+        #optimizer = tf.train.AdamOptimizer(learningrate)
+    #elif args.optimizer=='sgd':
+        #optimizer = tf.train.MomentumOptimizer(learningrate,args.momentum)
+    ##train_op = optimizer.minimize(op_loss_regularized, global_step=global_step)
+#
+    #gradients, variables = zip(*optimizer.compute_gradients(
+        #op_loss_regularized,
+        #colocate_gradients_with_ops=True,
+        #))
+    #gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
+    #train_op = optimizer.apply_gradients(
+        #zip(gradients, variables),
+        #global_step=global_step
+        #)
 
 ########################################
 print('preparing logging')
@@ -248,7 +315,7 @@ if args.initial_weights:
                 else:
                     print('  not restoring',k,'; old=',var_to_shape_map[k],'; new=',var.get_shape())
             except:
-                pass
+                print('  variable ',k,' not found in graph')
         loader = tf.train.Saver(var_dict)
         loader.restore(sess, chkpt_file)
 

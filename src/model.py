@@ -74,12 +74,28 @@ def update_parser(parser):
 
 ################################################################################
 
-def inference(args,input_tensors):
+def inference(args,input_tensors,reuse_variables=False):
     import tensorflow as tf
     op_losses={}
     op_metrics={}
     op_outputs={}
     epsilon = 1e-6
+
+    # function for creating variables in the right scope/device
+    def mk_variable(
+        init=None,
+        name=None,
+        trainable=True,
+        ):
+        if reuse_variables:
+            tf.get_variable_scope().reuse_variables()
+        with tf.device('/cpu:0'):
+            return tf.get_variable(
+                name=name,
+                shape=init.get_shape(),
+                trainable=trainable,
+                )
+        # FIXME: use initializer?
 
     # adjust hash functions for backwards compatibility
     if args.hashes_uniq:
@@ -115,7 +131,7 @@ def inference(args,input_tensors):
             make_summaries_without_newuser(mk_summary2)
 
     def make_summaries_without_newuser(mk_summary):
-        with tf.name_scope('mk_summaries'):
+        with tf.variable_scope('mk_summaries'):
             if args.summary_size=='small':
                 summary_langs=[]
                 summary_countries=[]
@@ -149,7 +165,7 @@ def inference(args,input_tensors):
             mk_summary('all/',weights)
 
     # summarize newusers
-    with tf.name_scope('newusers'):
+    with tf.variable_scope('newusers'):
         newuser_vec = tf.reshape(input_tensors['newuser_'],[args.batchsize])
         def mk_newuser_summary(basename,weights):
             tf.summary.scalar(basename+'newuser', tf.reduce_mean(weights*input_tensors['newuser_']))
@@ -189,9 +205,9 @@ def inference(args,input_tensors):
         layerindex=0
         input_layer_size=int(input_layer.get_shape()[1])
         for layersize in layers:
-            with tf.name_scope('full%d'%layerindex):
-                w = tf.Variable(var_init([input_layer_size,layersize],1.0/math.sqrt(float(layersize))),name='w')
-                b = tf.Variable(tf.constant(0.1,shape=[layersize]),name='b')
+            with tf.variable_scope('full%d'%layerindex):
+                w = mk_variable(var_init([input_layer_size,layersize],1.0/math.sqrt(float(layersize))),name='w')
+                b = mk_variable(tf.constant(0.1,shape=[layersize]),name='b')
                 h = tf.nn.relu(tf.matmul(input_layer,w)+b)
                 input_layer=tf.nn.dropout(h,args.dropout)
                 input_layer_size=layersize
@@ -199,14 +215,14 @@ def inference(args,input_tensors):
         return input_layer
 
     # tf inputs
-    with tf.name_scope('inputs'):
+    with tf.variable_scope('inputs'):
 
         regularizers=[]
         inputs=[]
 
         # myhash bow inputs
         if 'bow' in args.input:
-            with tf.name_scope('bow'):
+            with tf.variable_scope('bow'):
                 # FIXME: why does this need to be global?
                 global hash_
                 bow_size=2**args.bow_hashsize
@@ -220,7 +236,7 @@ def inference(args,input_tensors):
                     matmul = tf.sparse_tensor_dense_matmul
                     hash_reg=args.l1*tf.sparse_reduce_sum(tf.abs(hash_))
                 regularizers.append(hash_reg)
-                w = tf.Variable(var_init([bow_size,args.bow_layersize],1.0),name='w')
+                w = mk_variable(var_init([bow_size,args.bow_layersize],1.0),name='w')
                 b = tf.constant(0.1,shape=[args.bow_layersize])
                 bow = matmul(hash_,w)+b
                 inputs.append(bow)
@@ -233,25 +249,25 @@ def inference(args,input_tensors):
             # follows paper "very deep convolutional networks for text classification"
             if 'vdcnn' == args.cnn_type:
                 s=tweetlen
-                with tf.name_scope('vdcnn'):
+                with tf.variable_scope('vdcnn'):
                     def mk_conv(prev,numin,numout,swapdim=False):
                         mk_conv.count+=1
-                        with tf.name_scope('conv'+str(mk_conv.count)):
+                        with tf.variable_scope('conv'+str(mk_conv.count)):
                             if swapdim:
                                 shape=[3,1,numin,numout]
                                 padding='SAME'
                             else:
                                 shape=[3,numin,1,numout]
                                 padding='VALID'
-                            w = tf.Variable(var_init(shape,0.1),name='w')
-                            b = tf.Variable(tf.constant(0.1,shape=[numout]),name='b')
+                            w = mk_variable(var_init(shape,0.1),name='w')
+                            b = mk_variable(tf.constant(0.1,shape=[numout]),name='b')
                             conv = tf.nn.conv2d(prev, w, strides=[1,1,1,1], padding=padding)
                             return tf.nn.bias_add(conv,b)
                     mk_conv.count=0
 
                     def mk_conv_block(input,numin,numout,size=2):
                         net=input
-                        with tf.name_scope('conv_block'):
+                        with tf.variable_scope('conv_block'):
                             for i in range(0,size):
                                 net = mk_conv(net,numin,numout,swapdim=True)
                                 if not args.vdcnn_no_bn:
@@ -350,11 +366,11 @@ def inference(args,input_tensors):
             # see also: Language-Independent Twitter Classification Using Character-Based Convolutional Networks
             if 'cltcc' == args.cnn_type:
                 activation=tf.nn.relu
-                with tf.name_scope('cltcc'):
+                with tf.variable_scope('cltcc'):
                     filterlen=7
-                    with tf.name_scope('conv1'):
-                        w = tf.Variable(var_init([filterlen,args.cnn_vocabsize,1,args.cltcc_numfilters],args.cltcc_variance),name='w')
-                        b = tf.Variable(tf.constant(0.1,shape=[args.cltcc_numfilters]),name='b')
+                    with tf.variable_scope('conv1'):
+                        w = mk_variable(var_init([filterlen,args.cnn_vocabsize,1,args.cltcc_numfilters],args.cltcc_variance),name='w')
+                        b = mk_variable(tf.constant(0.1,shape=[args.cltcc_numfilters]),name='b')
                         conv = tf.nn.conv2d(text_reshaped, w, strides=[1,1,1,1], padding='VALID')
                         h = activation(tf.nn.bias_add(conv,b))
                         pooled = tf.nn.max_pool(
@@ -363,9 +379,9 @@ def inference(args,input_tensors):
                             strides=[1, 3, 1, 1],
                             padding='VALID')
 
-                    with tf.name_scope('conv2'):
-                        w = tf.Variable(var_init([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],args.cltcc_variance),name='w')
-                        b = tf.Variable(tf.constant(0.1,shape=[args.cltcc_numfilters]),name='b')
+                    with tf.variable_scope('conv2'):
+                        w = mk_variable(var_init([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],args.cltcc_variance),name='w')
+                        b = mk_variable(tf.constant(0.1,shape=[args.cltcc_numfilters]),name='b')
                         conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
                         h = activation(tf.nn.bias_add(conv,b))
                         pooled = tf.nn.max_pool(
@@ -375,30 +391,30 @@ def inference(args,input_tensors):
                             padding='VALID')
 
                     filterlen=3
-                    with tf.name_scope('conv3'):
-                        w = tf.Variable(var_init([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],args.cltcc_variance),name='w')
-                        b = tf.Variable(tf.constant(0.1,shape=[args.cltcc_numfilters]),name='b')
+                    with tf.variable_scope('conv3'):
+                        w = mk_variable(var_init([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],args.cltcc_variance),name='w')
+                        b = mk_variable(tf.constant(0.1,shape=[args.cltcc_numfilters]),name='b')
                         conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
                         h = activation(tf.nn.bias_add(conv,b))
                         pooled = h
 
-                    with tf.name_scope('conv4'):
-                        w = tf.Variable(var_init([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],args.cltcc_variance),name='w')
-                        b = tf.Variable(tf.constant(0.1,shape=[args.cltcc_numfilters]),name='b')
+                    with tf.variable_scope('conv4'):
+                        w = mk_variable(var_init([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],args.cltcc_variance),name='w')
+                        b = mk_variable(tf.constant(0.1,shape=[args.cltcc_numfilters]),name='b')
                         conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
                         h = activation(tf.nn.bias_add(conv,b))
                         pooled = h
 
-                    with tf.name_scope('conv5'):
-                        w = tf.Variable(var_init([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],args.cltcc_variance),name='w')
-                        b = tf.Variable(tf.constant(0.1,shape=[args.cltcc_numfilters]),name='b')
+                    with tf.variable_scope('conv5'):
+                        w = mk_variable(var_init([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],args.cltcc_variance),name='w')
+                        b = mk_variable(tf.constant(0.1,shape=[args.cltcc_numfilters]),name='b')
                         conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
                         h = activation(tf.nn.bias_add(conv,b))
                         pooled = h
 
-                    with tf.name_scope('conv6'):
-                        w = tf.Variable(var_init([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],args.cltcc_variance),name='w')
-                        b = tf.Variable(tf.constant(0.1,shape=[args.cltcc_numfilters]),name='b')
+                    with tf.variable_scope('conv6'):
+                        w = mk_variable(var_init([filterlen,1,args.cltcc_numfilters,args.cltcc_numfilters],args.cltcc_variance),name='w')
+                        b = mk_variable(tf.constant(0.1,shape=[args.cltcc_numfilters]),name='b')
                         conv = tf.nn.conv2d(pooled, w, strides=[1,1,1,1], padding='VALID')
                         h = activation(tf.nn.bias_add(conv,b))
                         pooled = tf.nn.max_pool(
@@ -417,17 +433,17 @@ def inference(args,input_tensors):
 
             # lang predictor
             if args.predict_lang:
-                with tf.name_scope('lang_predictor'):
+                with tf.variable_scope('lang_predictor'):
                     final_layer= mk_full_layers(cnn_layer,args.predict_lang_layers)
-                    w = tf.Variable(tf.zeros([final_layer.get_shape()[1],len(myhash.country_codes)]),name='w')
-                    b = tf.Variable(tf.zeros([len(myhash.country_codes)]),name='b')
+                    w = mk_variable(tf.zeros([final_layer.get_shape()[1],len(myhash.country_codes)]),name='w')
+                    b = mk_variable(tf.zeros([len(myhash.country_codes)]),name='b')
                     logits = tf.matmul(final_layer,w)+b
                     lang_softmax=tf.nn.softmax(logits)
                     mk_xentropy_layer('lang',input_tensors['lang_'],logits)
                     op_outputs['lang_softmax']=lang_softmax
 
             # the lang layer
-            with tf.name_scope('lang'):
+            with tf.variable_scope('lang'):
                 if args.predict_lang_use:
                     lang_one_hot=lang_softmax
                 else:
@@ -437,7 +453,7 @@ def inference(args,input_tensors):
 
         # time inputs
         if 'time' in args.input:
-            with tf.name_scope('time'):
+            with tf.variable_scope('time'):
 
                 def wrapped(var,length):
                     scaled=var/length*2*math.pi
@@ -451,27 +467,27 @@ def inference(args,input_tensors):
 
         # constant input, for debugging purposes
         if 'const' in args.input:
-            with tf.name_scope('const'):
+            with tf.variable_scope('const'):
                 const=tf.reshape(tf.tile(tf.constant([1.0]),[args.batchsize]),[args.batchsize,1])
                 inputs.append(const)
 
     # fully connected hidden layers
-    with tf.name_scope('full'):
+    with tf.variable_scope('full'):
         final_layer=tf.concat(map(tf.contrib.layers.flatten,inputs),axis=1)
         final_layer_size=int(final_layer.get_shape()[1])
         if args.full_per_lang:
             layersize=1024
-            with tf.name_scope('full0'):
-                w = tf.Variable(var_init([len(myhash.langs),final_layer_size,layersize]),name='w')
-                b = tf.Variable(tf.constant(0.1,shape=[len(myhash.langs),layersize]),name='b')
+            with tf.variable_scope('full0'):
+                w = mk_variable(var_init([len(myhash.langs),final_layer_size,layersize]),name='w')
+                b = mk_variable(tf.constant(0.1,shape=[len(myhash.langs),layersize]),name='b')
                 final_layer = tf.tensordot(final_layer,w,axes=[[1],[1]])+b
                 final_layer = tf.nn.relu(final_layer)
                 final_layer = tf.nn.dropout(final_layer,args.dropout)
                 final_layer = final_layer*tf.reshape(lang_one_hot,[args.batchsize,len(myhash.langs),1])
                 final_layer = tf.reduce_sum(final_layer,axis=1)
-            with tf.name_scope('full1'):
-                w = tf.Variable(var_init([len(myhash.langs),layersize,layersize]),name='w')
-                b = tf.Variable(tf.constant(0.1,shape=[len(myhash.langs),layersize]),name='b')
+            with tf.variable_scope('full1'):
+                w = mk_variable(var_init([len(myhash.langs),layersize,layersize]),name='w')
+                b = mk_variable(tf.constant(0.1,shape=[len(myhash.langs),layersize]),name='b')
                 final_layer = tf.tensordot(final_layer,w,axes=[[1],[1]])+b
                 final_layer = tf.nn.relu(final_layer)
                 final_layer = tf.nn.dropout(final_layer,args.dropout)
@@ -484,10 +500,10 @@ def inference(args,input_tensors):
             final_layer_size=int(final_layer.get_shape()[1])
 
     # rf outputs
-    with tf.name_scope('output'):
+    with tf.variable_scope('output'):
         # country loss
         if 'country' in args.output:
-            with tf.name_scope('country'):
+            with tf.variable_scope('country'):
 
                 # shortcuts
                 final_layer_country = final_layer
@@ -504,8 +520,8 @@ def inference(args,input_tensors):
                         final_layer_country_size += args.bow_layersize
 
                 # layer
-                w = tf.Variable(tf.zeros([final_layer_country_size,len(myhash.country_codes)]),name='w')
-                b = tf.Variable(tf.zeros([len(myhash.country_codes)]),name='b')
+                w = mk_variable(tf.zeros([final_layer_country_size,len(myhash.country_codes)]),name='w')
+                b = mk_variable(tf.zeros([len(myhash.country_codes)]),name='b')
                 logits = tf.matmul(final_layer_country,w)+b
                 country_softmax=tf.nn.softmax(logits)
                 op_outputs['country_softmax']=country_softmax
@@ -519,7 +535,7 @@ def inference(args,input_tensors):
             #loc_ = tf.placeholder(tf.int64, [args.batchsize,1],name='loc_')
             loc_ = input_tensors['loc_']
 
-            with tf.name_scope('loc'):
+            with tf.variable_scope('loc'):
                 # shortcuts
                 final_layer_loc = final_layer
                 final_layer_loc_size = final_layer_size
@@ -541,13 +557,13 @@ def inference(args,input_tensors):
 
                 # layer
                 if args.loc_bottleneck:
-                    w0 = tf.Variable(tf.zeros([final_layer_loc_size, args.loc_bottleneck]),name='w0')
-                    w1 = tf.Variable(tf.zeros([args.loc_bottleneck, myhash.loc_max]),name='w1')
-                    b1 = tf.Variable(tf.zeros([myhash.loc_max]),name='b1')
+                    w0 = mk_variable(tf.zeros([final_layer_loc_size, args.loc_bottleneck]),name='w0')
+                    w1 = mk_variable(tf.zeros([args.loc_bottleneck, myhash.loc_max]),name='w1')
+                    b1 = mk_variable(tf.zeros([myhash.loc_max]),name='b1')
                     logits = tf.matmul(final_layer_loc,tf.matmul(w0,w1))+b1
                 else:
-                    w1 = tf.Variable(tf.zeros([final_layer_loc_size, myhash.loc_max]),name='w1')
-                    b1 = tf.Variable(tf.zeros([myhash.loc_max]),name='b1')
+                    w1 = mk_variable(tf.zeros([final_layer_loc_size, myhash.loc_max]),name='w1')
+                    b1 = mk_variable(tf.zeros([myhash.loc_max]),name='b1')
                     logits = tf.matmul(final_layer_loc,w1)+b1
 
                 loc_softmax=tf.nn.softmax(logits)
@@ -558,7 +574,7 @@ def inference(args,input_tensors):
         if 'pos' in args.output:
             gps_=input_tensors['gps_']
 
-            with tf.name_scope('pos'):
+            with tf.variable_scope('pos'):
 
                 # shortcuts
                 pos_final_layer = final_layer
@@ -585,7 +601,7 @@ def inference(args,input_tensors):
                         pos_final_layer_size += int(country_softmax.get_shape()[1])
 
                 # decompose true labels
-                with tf.name_scope('reshape'):
+                with tf.variable_scope('reshape'):
                     op_lat_ = gps_[:,0]
                     op_lon_ = gps_[:,1]
                     op_lat_rad_ = op_lat_/360*2*math.pi
@@ -594,11 +610,11 @@ def inference(args,input_tensors):
 
                 # treat gps coords as R^2
                 if 'naive' == args.pos_type:
-                    w = tf.Variable(tf.zeros([pos_final_layer_size, 2]),name='w')
+                    w = mk_variable(tf.zeros([pos_final_layer_size, 2]),name='w')
                     if args.pos_warmstart:
-                        b = tf.Variable([34.052235,-118.243683],name='b')
+                        b = mk_variable([34.052235,-118.243683],name='b')
                     else:
-                        b = tf.Variable(tf.zeros([2]),name='b')
+                        b = mk_variable(tf.zeros([2]),name='b')
                     gps = tf.matmul(pos_final_layer,w) + b
                     op_lat = gps[:,0]
                     op_lon = gps[:,1]
@@ -606,11 +622,11 @@ def inference(args,input_tensors):
                 # angular generalized linear model
                 # See: "Regression Models for Angular Response" by Fisher and Lee
                 if 'aglm' == args.pos_type:
-                    w = tf.Variable(tf.zeros([pos_final_layer_size, 2]),name='w')
+                    w = mk_variable(tf.zeros([pos_final_layer_size, 2]),name='w')
                     if args.pos_warmstart:
-                        b = tf.Variable([0.6745,-2],name='b')
+                        b = mk_variable([0.6745,-2],name='b')
                     else:
-                        b = tf.Variable(tf.zeros([2]),name='b')
+                        b = mk_variable(tf.zeros([2]),name='b')
                     response = tf.matmul(pos_final_layer,w) + b
                     op_lat = tf.atan(response[:,0])*360/2/math.pi
                     op_lon = tf.atan(response[:,1])*360/math.pi
@@ -636,30 +652,30 @@ def inference(args,input_tensors):
 
                     if args.gmm_type=='simple' or args.gmm_type=='verysimple':
                         trainable=args.gmm_type!='verysimple'
-                        pre_mu_var = tf.Variable(pre_mu_gps_rad0,name='pre_mu',trainable=trainable)
+                        pre_mu_var = mk_variable(pre_mu_gps_rad0,name='pre_mu',trainable=trainable)
                         pre_mu_reshape = tf.reshape(pre_mu_var,[1,args.gmm_components,2])
                         pre_mu = args.gmm_lrfactor*pre_mu_reshape+(1-args.gmm_lrfactor)*tf.stop_gradient(pre_mu_reshape)
-                        pre_kappa = tf.Variable(pre_kappa_constant,name='pre_kappa',trainable=trainable)
+                        pre_kappa = mk_variable(pre_kappa_constant,name='pre_kappa',trainable=trainable)
                         kappa = safeish_exp(pre_kappa)
 
                     else:
-                        with tf.name_scope('pre_mu'):
-                            w = tf.Variable(tf.zeros([pos_final_layer_size,args.gmm_components,2]),name='w')
-                            b = tf.Variable(pre_mu_tan,name='b')
+                        with tf.variable_scope('pre_mu'):
+                            w = mk_variable(tf.zeros([pos_final_layer_size,args.gmm_components,2]),name='w')
+                            b = mk_variable(pre_mu_tan,name='b')
                             pre_mu_tan = tf.tensordot(pos_final_layer,w,axes=[1,0])+b
                             pre_mu = tf.atan(pre_mu_tan)
 
-                            pre_kappa = tf.Variable(pre_kappa_constant,name='pre_kappa')
+                            pre_kappa = mk_variable(pre_kappa_constant,name='pre_kappa')
                             kappa = safeish_exp(pre_kappa)
 
                         # FIXME: making kappa depend on pos_final_layer introduces a degenerate dependency on mu which prevents optimization
-                        #with tf.name_scope('pre_kappa'):
-                            #w = tf.Variable(var_init([pos_final_layer_size,args.gmm_components],0.1),name='w')
-                            #b = tf.Variable(pre_kappa_constant,name='b')
+                        #with tf.variable_scope('pre_kappa'):
+                            #w = mk_variable(var_init([pos_final_layer_size,args.gmm_components],0.1),name='w')
+                            #b = mk_variable(pre_kappa_constant,name='b')
                             #pre_kappa = tf.tensordot(pos_final_layer,w,axes=[1,0])+b
                         #kappa = tf.exp(pre_kappa)
 
-                    #kappa = tf.Variable(tf.exp(pre_kappa_constant))
+                    #kappa = mk_variable(tf.exp(pre_kappa_constant))
                     #pre_kappa = tf.log(tf.abs(kappa)+epsilon)
 
                     mu = tf.stack([ tf.sin(pre_mu[:,:,0])
@@ -679,22 +695,22 @@ def inference(args,input_tensors):
                     def decomposed_linear_layer(input_layer,mid_layer_sizes,output_size):
                         t={}
                         input_layer_size=int(input_layer.get_shape()[1])
-                        with tf.name_scope('decomposed_linear_layer'):
+                        with tf.variable_scope('decomposed_linear_layer'):
                             for i in mid_layer_sizes:
-                                with tf.name_scope('grouping_'+str(i)):
-                                    w1 = tf.Variable(var_init([input_layer_size,i]),name='w1')
-                                    w2 = tf.Variable(var_init([i,output_size]),name='w2')
+                                with tf.variable_scope('grouping_'+str(i)):
+                                    w1 = mk_variable(var_init([input_layer_size,i]),name='w1')
+                                    w2 = mk_variable(var_init([i,output_size]),name='w2')
                                     t[i] = tf.matmul(tf.matmul(input_layer,w1),w2)
-                            with tf.name_scope('grouping_all'):
-                                w = tf.Variable(var_init([input_layer_size,output_size]),name='w')
-                                b = tf.Variable(tf.constant(0.1,shape=[output_size]),name='b')
+                            with tf.variable_scope('grouping_all'):
+                                w = mk_variable(var_init([input_layer_size,output_size]),name='w')
+                                b = mk_variable(tf.constant(0.1,shape=[output_size]),name='b')
                                 t['all']=tf.matmul(input_layer,w)+b
                             logits=sum(t.values())
                         return logits
 
 
-                    w = tf.Variable(var_init([pos_final_layer_size,args.gmm_components],0.01),name='w')
-                    b = tf.Variable(tf.constant(0.1,shape=[args.gmm_components]),name='b')
+                    w = mk_variable(var_init([pos_final_layer_size,args.gmm_components],0.01),name='w')
+                    b = mk_variable(tf.constant(0.1,shape=[args.gmm_components]),name='b')
                     mixture_logits = tf.matmul(pos_final_layer,w)+b
                     #mixture_logits = decomposed_linear_layer(pos_final_layer,args.gmm_decomposed,args.gmm_components)
                     mixture = tf.nn.softmax(mixture_logits + epsilon) + epsilon
@@ -717,7 +733,7 @@ def inference(args,input_tensors):
                         log_likelihood_per_component = tf.exp(-kappa*vecsum)
                         # FIXME: double exp
                     elif args.gmm_distribution=='efam':
-                        pow_var = tf.Variable(tf.constant(0.1,shape=[args.gmm_components]),name='pow',trainable=True)
+                        pow_var = mk_variable(tf.constant(0.1,shape=[args.gmm_components]),name='pow',trainable=True)
                         pow = tf.maximum(pow_var,1e-9)
                         op_outputs['aglm_mix/pow']=pow
                         vecsum=tf.reduce_sum(tf.abs(x_reshape-mu)**pow,axis=0)
@@ -731,12 +747,12 @@ def inference(args,input_tensors):
                     op_losses['pos_loss_mix']=loss
                     op_metrics['optimization/aglm_mix']=(args.batchsize,loss)
 
-                    with tf.name_scope('summaries'):
+                    with tf.variable_scope('summaries'):
                         vals,indices=tf.nn.top_k(mixture,k=args.gmm_components)
                         mixture_sum=tf.reduce_mean(tf.reduce_sum(mixture,axis=1))
 
                         def summarize_vector(v,n):
-                            with tf.name_scope(n):
+                            with tf.variable_scope(n):
                                 op_metrics['mix/'+n+'/max']=tf.reduce_max(v)
                                 op_metrics['mix/'+n+'/min']=tf.reduce_min(v)
                                 op_metrics['mix/'+n+'/mean']=tf.reduce_mean(v)
@@ -846,7 +862,7 @@ def inference(args,input_tensors):
                 make_summaries(mk_metric)
 
     # set loss function
-    with tf.name_scope('loss'):
+    with tf.variable_scope('loss'):
         op_projections=[]
 
         if args.loss_weights == 'auto':
@@ -854,7 +870,7 @@ def inference(args,input_tensors):
             op_loss=0
             num_losses = len(op_losses)
             w0 = tf.constant(1.0/float(num_losses),shape=[num_losses])
-            w = tf.Variable(w0,name='w')
+            w = mk_variable(w0,name='w')
             w_max = tf.maximum(w, tf.constant(epsilon,shape=[num_losses]))
             w_norm = tf.reduce_sum(w_max)+epsilon
             i=0
@@ -908,7 +924,7 @@ def inference(args,input_tensors):
         op_metrics['optimization/op_loss']=op_loss
 
         # add regularizers
-        with tf.name_scope('l2_regularization'):
+        with tf.variable_scope('l2_regularization'):
             vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
             for var in vars:
                 regularizers.append(args.l2*tf.nn.l2_loss(var))
@@ -923,7 +939,7 @@ def inference(args,input_tensors):
 def metrics2summaries(args,op_metrics):
     import tensorflow as tf
     summaries={}
-    with tf.name_scope('streaming_mean'):
+    with tf.variable_scope('streaming_mean'):
         for k,v in op_metrics.iteritems():
             try:
                 (weights,metric)=v
