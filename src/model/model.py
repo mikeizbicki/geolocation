@@ -89,8 +89,10 @@ def inference(args,input_tensors,reuse_variables=False):
         ):
         if reuse_variables:
             tf.get_variable_scope().reuse_variables()
-        with tf.device('/cpu:0'):
+        with tf.device('cpu:0'):
             return tf.get_variable(
+            #return tf.Variable(
+                #init,
                 name=name,
                 shape=init.get_shape(),
                 trainable=trainable,
@@ -139,8 +141,9 @@ def inference(args,input_tensors,reuse_variables=False):
                 summary_langs=['en','ja','es','ar','fr','zh','pt','tr','tl','in','und','de','vi']
                 summary_countries=['US','MX','ES','FR','JP']
             elif args.summary_size=='all':
-                summary_langs=myhash.langs
-                summary_countries=myhash.country_codes
+                summary_langs=myhash.langs_true
+                summary_countries=['US','MX','ES','FR','JP']
+                #summary_countries=myhash.country_codes
 
             for lang in summary_langs:
                 weights = tf.cast(tf.equal(input_tensors['lang_'],myhash.lang2int(lang)),tf.float32)
@@ -224,11 +227,13 @@ def inference(args,input_tensors,reuse_variables=False):
         if 'bow' in args.input:
             with tf.variable_scope('bow'):
                 # FIXME: why does this need to be global?
-                global hash_
+                #global hash_
                 bow_size=2**args.bow_hashsize
                 if args.bow_dense:
-                    hash_ = tf.placeholder(tf.float32,[args.batchsize,bow_size],'hash_')
-                    raise ValueError('fixme')
+                    #hash_ = tf.placeholder(tf.float32,[args.batchsize,bow_size],'hash_')
+                    #raise ValueError('fixme')
+                    print('input_tensors.keys()=',input_tensors.keys())
+                    hash_ = input_tensors['hash_']
                     matmul = tf.matmul
                     hash_reg=args.l1*tf.reduce_sum(tf.abs(hash_))
                 else:
@@ -612,7 +617,7 @@ def inference(args,input_tensors,reuse_variables=False):
                 if 'naive' == args.pos_type:
                     w = mk_variable(tf.zeros([pos_final_layer_size, 2]),name='w')
                     if args.pos_warmstart:
-                        b = mk_variable([34.052235,-118.243683],name='b')
+                        b = mk_variable(tf.constant([34.052235,-118.243683]),name='b')
                     else:
                         b = mk_variable(tf.zeros([2]),name='b')
                     gps = tf.matmul(pos_final_layer,w) + b
@@ -624,7 +629,7 @@ def inference(args,input_tensors,reuse_variables=False):
                 if 'aglm' == args.pos_type:
                     w = mk_variable(tf.zeros([pos_final_layer_size, 2]),name='w')
                     if args.pos_warmstart:
-                        b = mk_variable([0.6745,-2],name='b')
+                        b = mk_variable(tf.constant([0.6745,-2]),name='b')
                     else:
                         b = mk_variable(tf.zeros([2]),name='b')
                     response = tf.matmul(pos_final_layer,w) + b
@@ -967,6 +972,8 @@ def preprocess_text(args,str):
 
 ################################################################################
 
+import sets
+userids=sets.Set()
 def json2dict(args,str):
     import sklearn.feature_extraction.text
     hv=sklearn.feature_extraction.text.HashingVectorizer(n_features=2**args.bow_hashsize,norm=None)
@@ -990,11 +997,12 @@ def json2dict(args,str):
 
     # userids
     try:
-        if data['user']['id'] in userids:
-            batch_dict['newuser_']=0
-        else:
-            batch_dict['newuser_']=1
-            userids.add(data['user']['id'])
+        if args.summary_newusers:
+            if data['user']['id'] in userids:
+                batch_dict['newuser_']=0
+            else:
+                batch_dict['newuser_']=1
+                userids.add(data['user']['id'])
     except:
         batch_dict['newuser_']=0
 
@@ -1077,7 +1085,7 @@ def json2dict(args,str):
 
 ################################################################################
 
-def mk_feed_dict(args,batch):
+def mk_feed_dict(args,batch,suffix=':0'):
     import numpy as np
     import scipy as sp
     import tensorflow as tf
@@ -1089,8 +1097,8 @@ def mk_feed_dict(args,batch):
         for k in data:
             batch_dict[k].append(data[k])
 
-    feed_dict['lang_:0'] = np.vstack(batch_dict['lang_'])
-    feed_dict['newuser_:0'] = np.vstack(batch_dict['newuser_'])
+    feed_dict['lang_'+suffix] = np.vstack(batch_dict['lang_'])
+    feed_dict['newuser_'+suffix] = np.vstack(batch_dict['newuser_'])
 
     if 'bow' in args.input:
         def mkSparseTensorValue(m):
@@ -1103,21 +1111,21 @@ def mk_feed_dict(args,batch):
                     m2.data,
                     m2.shape,
                     )
-        feed_dict[hash_] = mkSparseTensorValue(sp.sparse.vstack(batch_dict['hash_']))
+        feed_dict['hash_'+suffix] = mkSparseTensorValue(sp.sparse.vstack(batch_dict['hash_']))
 
     if 'cnn' in args.input:
-        feed_dict['text_:0'] = np.vstack(batch_dict['text_'])
+        feed_dict['text_'+suffix] = np.vstack(batch_dict['text_'])
 
     if 'time' in args.input:
-        feed_dict['timestamp_ms_:0'] = np.vstack(batch_dict['timestamp_ms_'])
+        feed_dict['timestamp_ms_'+suffix] = np.vstack(batch_dict['timestamp_ms_'])
 
     #if 'country' in args.output:
-    feed_dict['country_:0'] = np.vstack(batch_dict['country_'])
+    feed_dict['country_'+suffix] = np.vstack(batch_dict['country_'])
 
     if 'pos' in args.output:
-        feed_dict['gps_:0'] = np.vstack(batch_dict['gps_'])
+        feed_dict['gps_'+suffix] = np.vstack(batch_dict['gps_'])
 
     if 'loc' in args.output:
-        feed_dict['loc_:0'] = np.vstack(batch_dict['loc_'])
+        feed_dict['loc_'+suffix] = np.vstack(batch_dict['loc_'])
 
     return feed_dict

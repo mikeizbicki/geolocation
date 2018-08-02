@@ -18,6 +18,7 @@ parser.add_argument('--log_dir',type=str,default='log')
 parser.add_argument('--log_name',type=str,default=None)
 parser.add_argument('--stepsave',type=int,default=10000)
 parser.add_argument('--seed',type=int,default=0)
+parser.add_argument('--stagingarea',type=bool,default=True)
 
 # debug variables
 parser.add_argument('--no_checkpoint',action='store_true')
@@ -79,36 +80,96 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 tf.set_random_seed(args.seed)
 
 # get cuda devices
-#cuda_devices=['0']
-cuda_devices=os.environ['CUDA_VISIBLE_DEVICES'].split(',')
+try:
+    cuda_devices=os.environ['CUDA_VISIBLE_DEVICES'].split(',')
+    if cuda_devices==['NoDevFiles']:
+        cuda_devices=['no_cuda']
+except KeyError:
+    cuda_devices=['no_cuda']
+#cuda_devices=['3'] #,'2','3']
 num_devices=float(len(cuda_devices))
 print('cuda_devices=',cuda_devices)
+
+# inputs
+placeholders={
+    'country_' : tf.placeholder(tf.int64, [args.batchsize,1],name='country_'),
+    'text_' : tf.placeholder(tf.float32, [args.batchsize,model.tweetlen,args.cnn_vocabsize],name='text_'),
+    'gps_' : tf.placeholder(tf.float32, [args.batchsize,2], name='gps_'),
+    #'loc_' : tf.placeholder(tf.int64, [args.batchsize,1],name='loc_'),
+    'timestamp_ms_' : tf.placeholder(tf.float32, [args.batchsize,1], name='timestamp_ms_'),
+    'lang_' : tf.placeholder(tf.int32, [args.batchsize,1], 'lang_'),
+    'newuser_' : tf.placeholder(tf.float32, [args.batchsize,1],name='newuser_'),
+    #'hash_' : tf.sparse_placeholder(tf.float32,name='hash_'),
+    }
+#input_queue=tf.contrib.staging.StagingArea(
+    #capacity=2*num_devices,
+    #dtypes=map(lambda x: x.dtype, placeholders.values()),
+    #shapes=map(lambda x: x.get_shape(), placeholders.values()),
+    #names=placeholders.keys(),
+    #)
+#input_queue_size=input_queue.size()
+#input_queue_enqueue=input_queue.put(placeholders)
 
 # generate model on each device
 device_inputs={}
 device_metrics={}
 device_loss_reg={}
 device_grads={}
+device_grads_summary={}
+device_set_vars={}
+device_input_queue={}
+device_input_queue_size={}
+device_input_queue_enqueue={}
+device_input_queue_dequeue={}
+device_input_queue_peek={}
 
 reuse_variables=False
 for device in cuda_devices:
-    with tf.device("/device:GPU:"+device):
+    devicestr="/device:GPU:"+device
+    if device=='no_cuda':
+        devicestr='/cpu:0'
+    print('devicestr=',devicestr)
+    with tf.device(devicestr):
         with tf.variable_scope('input'+device):
             device_inputs[device]={
                 'country_' : tf.placeholder(tf.int64, [args.batchsize,1],name='country_'),
-                'text_' : tf.placeholder(tf.float32, [args.batchsize,model.tweetlen,args.cnn_vocabsize],name='text_'),
                 'gps_' : tf.placeholder(tf.float32, [args.batchsize,2], name='gps_'),
-                'loc_' : tf.placeholder(tf.int64, [args.batchsize,1],name='loc_'),
-                'timestamp_ms_' : tf.placeholder(tf.float32, [args.batchsize,1], name='timestamp_ms_'),
-                'lang_' : tf.placeholder(tf.int32, [args.batchsize,1], 'lang_'),
+                #'loc_' : tf.placeholder(tf.int64, [args.batchsize,1],name='loc_'),
                 'newuser_' : tf.placeholder(tf.float32, [args.batchsize,1],name='newuser_'),
-                'hash_' : tf.sparse_placeholder(tf.float32,name='hash_'),
+                #'hash_' : tf.sparse_placeholder(tf.float32,name='hash_'),
             }
+            if 'time' in args.input:
+                device_inputs[device]['timestamp_ms_'] = tf.placeholder(tf.float32, [args.batchsize,1], name='timestamp_ms_')
+            if 'lang' in args.input:
+                device_inputs[device]['lang_'] = tf.placeholder(tf.int32, [args.batchsize,1], 'lang_')
+            if 'cnn' in args.input:
+                device_inputs[device]['text_'] =  tf.placeholder(tf.float32, [args.batchsize,model.tweetlen,args.cnn_vocabsize],name='text_')
+            if 'bow' in args.input:
+                if args.bow_dense:
+                    device_inputs[device]['hash_'] = tf.placeholder(tf.float32,name='hash_')
+                else:
+                    device_inputs[device]['hash_'] = tf.sparse_placeholder(tf.float32,name='hash_')
+
+        if args.staging_area:
+            device_input_queue[device]=tf.contrib.staging.StagingArea(
+                dtypes=map(lambda x: x.dtype, device_inputs[device].values()),
+                shapes=map(lambda x: x.get_shape(), device_inputs[device].values()),
+                names=device_inputs[device].keys(),
+                )
+            device_input_queue_size[device]=device_input_queue[device].size()
+            device_input_queue_enqueue[device]=device_input_queue[device].put(device_inputs[device])
+            device_input_queue_dequeue[device]=device_input_queue[device].get()
+            device_input_queue_peek[device]=device_input_queue[device].peek(0)
+            device_input=device_input_queue_dequeue[device]
+        else:
+            device_input=device_inputs[device]
+
         device_metrics[device],device_loss_reg[device],op_losses,op_outputs = model.inference(
             args,
-            device_inputs[device],
+            device_input,
             reuse_variables
             )
+
         reuse_variables=True
         with tf.variable_scope('optimization'):
             global_step = tf.Variable(0, name='global_step', trainable=False)
@@ -127,10 +188,11 @@ for device in cuda_devices:
             elif args.optimizer=='sgd':
                 optimizer = tf.train.MomentumOptimizer(learningrate,args.momentum)
 
-            #gradients, variables = zip(*optimizer.compute_gradients(
-                #op_loss_regularized,
-                ##colocate_gradients_with_ops=True,
-                #))
+            gradients, variables = zip(*optimizer.compute_gradients(
+                device_loss_reg[device],
+                #colocate_gradients_with_ops=True,
+                ))
+            device_grads_summary[device]=sum(map(lambda x: tf.reduce_sum(x),gradients))
             #gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
             device_grads[device]=(optimizer.compute_gradients(device_loss_reg[device]))
 
@@ -171,12 +233,13 @@ def average_gradients(tower_grads):
         average_grads.append(grad_and_var)
     return average_grads
 
-with tf.variable_scope('merge_losses'):
-    grads = average_gradients(device_grads.values())
-    train_op = optimizer.apply_gradients(
-        grads,
-        global_step=global_step
-        )
+with tf.device('/cpu:0'):
+    with tf.variable_scope('merge_losses'):
+        averaged_grads = average_gradients(device_grads.values())
+        train_op = optimizer.apply_gradients(
+            averaged_grads,
+            global_step=global_step
+            )
 
 # combine summaries
 with tf.variable_scope('summaries'):
@@ -186,7 +249,7 @@ with tf.variable_scope('summaries'):
         for device in cuda_devices:
             metric.append(device_metrics[device][k])
         try:
-            w_total=0
+            w_total=1e-6
             metric_tmp=[]
             for (w,v) in metric:
                 w_total+=w
@@ -312,20 +375,23 @@ if args.initial_weights:
                 var=tf.get_default_graph().get_tensor_by_name(k2+":0")
                 if var.get_shape() == var_to_shape_map[k]:
                     var_dict[k]=var
+                    print('  restoring',k)
                 else:
                     print('  not restoring',k,'; old=',var_to_shape_map[k],'; new=',var.get_shape())
-            except:
-                print('  variable ',k,' not found in graph')
+            except Exception as e:
+                print('  variable not found in graph: ',k)
+                #print('    e=',e)
         loader = tf.train.Saver(var_dict)
         loader.restore(sess, chkpt_file)
 
     restore('')
-    for i in range(1,len(cuda_devices)):
-        restore('_'+str(i))
+    #for i in range(1,len(cuda_devices)):
+        #restore('_'+str(i))
 
     #print('vars=',tf.trainable_variables())
     #for var in tf.trainable_variables():
         #print('var=',var)
+
     #raise ValueError('poop')
     #print('  restored_vars=',var_dict)
     #loader = tf.train.Saver(var_dict)
@@ -333,8 +399,6 @@ if args.initial_weights:
     #loader.restore(sess, args.initial_weights)
     #saver.restore(sess,args.initial_weights)
     print('  model restored from ',args.initial_weights)
-
-sess.graph.finalize()
 
 ########################################
 print('allocate dataset files')
@@ -404,126 +468,161 @@ open_files=[]
 random.seed(args.seed)
 np.random.seed(args.seed)
 
-# function that returns the next batch
-def mk_batch():
-    global files_remaining
-    batch=[]
-    while len(batch) < args.batchsize:
-
-        # load and decode next json entry
-        while len(open_files)<args.max_open_files and len(files_remaining)>0:
-            if args.data_style=='online':
-                index=0
-            else:
-                if args.data_sample == 'uniform':
-                    index=random.randrange(len(files_remaining))
-                elif args.data_sample == 'fancy':
-                    choices=3
-                    choice=np.random.randint(choices)+1
-                    index=random.randrange(1+int((choice/float(choices))*len(files_remaining)))
-                    print('index=',index)
-
-            filename=files_remaining[index]
-            files_remaining.pop(index)
-            try:
-                open_files.append(gzip.open(filename,'rt'))
-            except Exception as e:
-                print('gzip.open failed on ',filename,file=sys.stderr)
-                print(e,file=sys.stderr)
-                continue
-            print('  opening [%s]; files remaining: %d/%d; buffer state: %d/%d'%(
-                filename,
-                len(files_remaining),
-                len(files_all),
-                len(open_files),
-                args.max_open_files,
-                ))
-
-        if len(open_files)==0:
-            if args.data_style=='online':
-                print('done.')
-                sys.exit(0)
-            else:
-                stats_epoch['new']=True
-                stats_epoch['count']+=1
-                files_remaining=copy.deepcopy(files_all)
-                continue
-
-        index=random.randrange(len(open_files))
-        try:
-            nextline=open_files[index].readline()
-            if nextline=='':
-                raise ValueError('done')
-        except Exception as e:
-            open_files[index].close()
-            open_files.pop(index)
-            continue
-
-        #if batch==[]:
-            #print('nextline=',nextline)
-
-        try:
-        #if True:
-            decoding_time_model_start=time.time()
-            stats_step['numlines']+=1
-            data=model.json2dict(args,nextline)
-            batch.append(data)
-            stats_step['validtweets']+=1
-            decoding_time_model_stop=time.time()
-            stats_step['decoding_time_model']+=decoding_time_model_stop-decoding_time_model_start
-        except Exception as e:
-            #pass
-            #print('current file=',open_files[index].name)
-            if str(e)!="'text'":
-                print(e)
-            #continue
-
-    feed_dict=model.mk_feed_dict(args,batch)
-    return feed_dict
 
 # setup multiprocessing
 import multiprocessing as mp
-queue = mp.Queue(maxsize=20)
+#if cuda_devices==['no_cuda']:
+    #fmq=mp
+#else:
+import fmq
+mp_queue = fmq.Queue(maxsize=20*len(cuda_devices))
 
-def mk_batches():
+def mk_batches(device_files,deviceid):
+
+    files_remaining=copy.deepcopy(device_files)
+
+    # function that returns the next batch
+    # loop
     while True:
-        feed_dict=mk_batch()
-        queue.put(feed_dict)
+        batch=[]
+        while len(batch) < args.batchsize:
 
-process=mp.Process(target=mk_batches)
-process.start()
+            # load and decode next json entry
+            while len(open_files)<args.max_open_files and len(files_remaining)>0:
+                if args.data_style=='online':
+                    index=0
+                else:
+                    if args.data_sample == 'uniform':
+                        index=random.randrange(len(files_remaining))
+                    elif args.data_sample == 'fancy':
+                        choices=3
+                        choice=np.random.randint(choices)+1
+                        index=random.randrange(1+int((choice/float(choices))*len(files_remaining)))
+                        print('index=',index)
+
+                filename=files_remaining[index]
+                files_remaining.pop(index)
+                try:
+                    open_files.append(gzip.open(filename,'rt'))
+                except Exception as e:
+                    print('gzip.open failed on ',filename,file=sys.stderr)
+                    print(e,file=sys.stderr)
+                    continue
+                print('  opening [%s]; files remaining: %d/%d; buffer state: %d/%d'%(
+                    filename,
+                    len(files_remaining),
+                    len(device_files),
+                    len(open_files),
+                    args.max_open_files,
+                    ))
+
+            if len(open_files)==0:
+                if args.data_style=='online':
+                    print('done.')
+                    sys.exit(0)
+                else:
+                    stats_epoch['new']=True
+                    stats_epoch['count']+=1
+                    files_remaining=copy.deepcopy(files_all)
+                    continue
+
+            index=random.randrange(len(open_files))
+            try:
+                nextline=open_files[index].readline()
+                if nextline=='':
+                    raise ValueError('done')
+            except Exception as e:
+                open_files[index].close()
+                open_files.pop(index)
+                continue
+
+            #if batch==[]:
+                #print('nextline=',nextline)
+
+            try:
+            #if True:
+                data=model.json2dict(args,nextline)
+                batch.append(data)
+            except Exception as e:
+                #pass
+                #print('current file=',open_files[index].name)
+                if str(e)!="'text'":
+                    print('  exception:',e)
+
+        feed_dict=model.mk_feed_dict(args,batch)
+        #print('mp_queue.qsize()=',mp_queue.qsize())
+        mp_queue.put(feed_dict)
+
+for i in range(0,len(cuda_devices)):
+    device_files=files_remaining[
+        (i+0)*len(files_remaining)/len(cuda_devices):
+        (i+1)*len(files_remaining)/len(cuda_devices)
+        ]
+    process=mp.Process(target=mk_batches,args=[device_files,i])
+    process.start()
+
+# finalize graph
+#coord = tf.train.Coordinator()
+#enqueue_threads = qr.create_threads(sess, coord=coord, start=True)
+sess.graph.finalize()
 
 # loop through training data
+firstLoop=True
 while True:
-    stats_step['count']+=1
-    stats_epoch['steps']+=1
 
+    # load a feed_dict from the processes
+    # on the first loop, these will get stored in the staging area
     decoding_time_start=time.time()
     if not args.repeat_batch or stats_step['count']==0:
         feed_dict={}
         for device in cuda_devices:
-            device_dict=queue.get()
+            device_dict=mp_queue.get()
+            queue_size=mp_queue.qsize()
+            if queue_size<5:
+                print('mp_queue.qsize()=',mp_queue.qsize())
             for k,v in device_dict.iteritems():
                 feed_dict['input'+device+'/'+k]=v
-        #raise ValueError('poop')
     decoding_time_stop=time.time()
     stats_step['decoding_time']+=decoding_time_stop-decoding_time_start
     stats_epoch['decoding_time']+=decoding_time_stop-decoding_time_start
 
+    if firstLoop:
+        sess.run(device_input_queue_enqueue,feed_dict=feed_dict)
+        firstLoop=False
+        continue
+
+    # update loop counters
+    # Note: this must be after the firstLoop check above due to the continue
+    stats_step['count']+=1
+    stats_epoch['steps']+=1
+
+    # Write the summaries and print an overview fairly often.
+    record_summary=(
+        (stats_step['count'] < 10) or
+        (stats_step['count'] < 1000 and stats_step['count']%10 == 0) or
+        (stats_step['count'] < 10000 and stats_step['count']%100 == 0) or
+        (stats_step['count']%1000 == 0))
+
     # run the model
     run_time_start=time.time()
-    _, metrics = sess.run(
-        [ train_op, op_summaries ]
-        , feed_dict=feed_dict
-        )
+    if record_summary:
+        print('feed_dict.keys()=',feed_dict.keys())
+        _a,_b,_c,summary_str = sess.run(
+            [ train_op , op_summaries, device_input_queue_enqueue, summary ]
+            , feed_dict=feed_dict
+            )
+        summary_writer.add_summary(summary_str, stats_step['count']*args.batchsize*num_devices)
+        summary_writer.flush()
+    else:
+        sess.run(
+            [ train_op , op_summaries, device_input_queue_enqueue ]
+            , feed_dict=feed_dict
+            )
     run_time_stop=time.time()
     stats_step['run_time']+=run_time_stop-run_time_start
 
     # Write the summaries and print an overview fairly often.
-    if (stats_step['count'] < 10 or
-       (stats_step['count'] < 1000 and stats_step['count']%10 == 0) or
-       (stats_step['count'] < 10000 and stats_step['count']%100 == 0) or
-       (stats_step['count']%1000 == 0)):
+    if record_summary:
         output='  %8d/%4d: good=%1.2f  dec=%1.2f  dec_m=%1.2f run=%1.2f' % (
               stats_step['count']
             , stats_epoch['count']
@@ -539,10 +638,10 @@ while True:
             raise ValueError('NaN loss')
 
         # save summaries if not debugging
-        if not args.no_checkpoint:
-            summary_str = sess.run(summary, feed_dict=feed_dict)
-            summary_writer.add_summary(summary_str, stats_step['count']*args.batchsize*num_devices)
-            summary_writer.flush()
+        #if not args.no_checkpoint:
+            #summary_str = sess.run(summary) #, feed_dict=feed_dict)
+            #summary_writer.add_summary(summary_str, stats_step['count']*args.batchsize*num_devices)
+            #summary_writer.flush()
 
         # save model if not debugging
         if (stats_step['count'] in [1,100,1000] or stats_step['count'] % args.stepsave == 0) and not args.no_checkpoint:
@@ -550,18 +649,13 @@ while True:
             saver.save(sess, checkpoint_file, global_step=stats_step['count'])
 
         # reset step variables and update epoch counters
-        for k,(v,_) in metrics.iteritems():
-            stats_epoch['err'][k]+=metrics[k][0]
         reset_stats_step()
         sess.run(reset_local_vars)
 
+    # process epoch
+    # FIXME: should this be removed?
     if stats_epoch['new']:
         err=''
-        for k,v in stats_epoch['err'].iteritems():
-            if k=='dist':
-                err='%s %s:%1.2E'%(err,k,v)
-            else:
-                err='%s %s:%1.4f'%(err,k,v)
 
         print('--------------------------------------------------------------------------------')
         print('epoch %d' % stats_epoch['count'])
