@@ -14,16 +14,22 @@ import argparse
 
 parser=argparse.ArgumentParser('infer using a model')
 
-parser.add_argument('--modeldir',type=str)
-parser.add_argument('--outputdir',type=str,default='img-infer')
+parser.add_argument('--modeldir',type=str,required=True)
+parser.add_argument('--outputdir',type=str,default='img/infer')
 #parser.add_argument('--tweets',type=str,default='data/infer/riverside')
 parser.add_argument('--tweets',type=str,default='data/infer/infer')
 #parser.add_argument('--tweets',type=str,default='data/twitter-early/geoTwitter17-10-21/geoTwitter17-10-21_01:05.gz')
 #parser.add_argument('--tweets',type=str,default='data/MX/train.gz')
 parser.add_argument('--maxtweets',type=int,default=100)
-parser.add_argument('--plot_res',choices=['hi','med','lo'],default='med')
+parser.add_argument('--plot_res',choices=['hi','good','med','lo'],default='med')
+parser.add_argument('--plot_true',type=bool,default=True)
+parser.add_argument('--plot_mle',type=bool,default=False)
 parser.add_argument('--plot_mu',type=bool,default=False)
 parser.add_argument('--plot_numbars',type=int,default=5)
+parser.add_argument('--overwrite',action='store_true')
+parser.add_argument('--notext',action='store_true')
+parser.add_argument('--format',type=str,choices=['png','eps','pgf'],default='png')
+parser.add_argument('--marker',type=str,choices=['.','o'],default='o')
 
 args = parser.parse_args()
 
@@ -53,6 +59,17 @@ with open(args.modeldir+'/args.json','r') as f:
         args_train.text_latin_bit=True
         args_train.text_transliterate=True
         args_train.text_hashsize_combiners=True
+
+    try:
+        args_train.gmm_distribution
+    except:
+        args_train.gmm_distribution='fvm'
+
+    try:
+        args_train.hashes_true
+    except:
+        args_train.hashes_true=False
+        args_train.full_per_lang=False
 
 ########################################
 print('loading model weights')
@@ -87,8 +104,8 @@ def restore_session(batchsize):
         config = tf.ConfigProto(allow_soft_placement = True)
         ret.sess = tf.Session(config=config)
         saver=tf.train.Saver()
-        #chkpt_file=tf.train.latest_checkpoint(args.modeldir)
-        chkpt_file=args.modeldir+'/model.ckpt-130000'
+        chkpt_file=tf.train.latest_checkpoint(args.modeldir)
+        #chkpt_file=args.modeldir+'/model.ckpt-130000'
         saver.restore(ret.sess,chkpt_file)
         return ret
 
@@ -143,15 +160,32 @@ import numpy as np
 file=open(args.tweets,'r')
 #file.readline()
 
+# generate outputdir directory if needed
+dataname=os.path.basename(os.path.normpath(args.tweets))
+outputdir=args.outputdir+'/'+dataname
+try:
+    os.makedirs(outputdir)
+except:
+    pass
+
+# main loop
 for tweetnum in range(0,args.maxtweets):
 
     print(datetime.datetime.now(),'tweet',tweetnum)
     line=file.readline()
+    basename=str(tweetnum)+'-'+args.plot_res
+
+    # skip if already computed
+    if not args.overwrite:
+        mainfilepath=outputdir+'/'+basename+'.'+args.format
+        if os.path.exists(mainfilepath):
+            continue
 
     # get tweet data
     tweet=json.loads(line)
     tweet['text']=model.preprocess_text(args_train,tweet['text'])
     input=model.json2dict(args_train,line)
+    input['newuser_']=np.array([1])
     print('  input[gps_]=',input['gps_'])
     lat_=input['gps_'][0]
     lon_=input['gps_'][1]
@@ -194,33 +228,33 @@ for tweetnum in range(0,args.maxtweets):
     # tweet mangling
     import copy
     all_losses_mangled=[]
-    for i in range(0,len(tweet['text'])):
-        input_new=copy.deepcopy(input)
-        arr1=input_new['text_'][:,:max(0,i-0),:]
-        arr2=input_new['text_'][:,min(model.tweetlen,i+1):,:]
-        input_new['text_']=np.concatenate(
-            [arr1
-            ,arr2
-            ,np.zeros([
-                1,
-                model.tweetlen-arr1.shape[1]-arr2.shape[1],
-                input_new['text_'].shape[2]
-                ])
-            ],axis=1)
-        feed_dict=model.mk_feed_dict(bs1.args,[input_new])
-        loss_mangled,losses_mangled,output_mangled=bs1.sess.run(
-            [bs1.op_loss_regularized, bs1.op_losses, bs1.op_outputs],
-            feed_dict=feed_dict
-            )
-        tweetchar=tweet['text'][i]
-        if ord(tweetchar)>127:
-            tweetchar='???'
-        #print('  %3d'%i,tweet['text'][i],'loss_mangled=',loss_mangled)
-        print('  %3d'%i,tweetchar,'loss_mangled=',loss_mangled)
-        all_losses_mangled.append(losses_mangled)
-    while len(all_losses_mangled) < model.tweetlen:
-        all_losses_mangled.append(losses)
-    #sys.exit(1)
+    if not args.notext:
+        for i in range(0,len(tweet['text'])):
+            input_new=copy.deepcopy(input)
+            arr1=input_new['text_'][:,:max(0,i-0),:]
+            arr2=input_new['text_'][:,min(model.tweetlen,i+1):,:]
+            input_new['text_']=np.concatenate(
+                [arr1
+                ,arr2
+                ,np.zeros([
+                    1,
+                    model.tweetlen-arr1.shape[1]-arr2.shape[1],
+                    input_new['text_'].shape[2]
+                    ])
+                ],axis=1)
+            feed_dict=model.mk_feed_dict(bs1.args,[input_new])
+            loss_mangled,losses_mangled,output_mangled=bs1.sess.run(
+                [bs1.op_loss_regularized, bs1.op_losses, bs1.op_outputs],
+                feed_dict=feed_dict
+                )
+            tweetchar=tweet['text'][i]
+            if ord(tweetchar)>127:
+                tweetchar='???'
+            #print('  %3d'%i,tweet['text'][i],'loss_mangled=',loss_mangled)
+            print('  %3d'%i,tweetchar,'loss_mangled=',loss_mangled)
+            all_losses_mangled.append(losses_mangled)
+        while len(all_losses_mangled) < model.tweetlen:
+            all_losses_mangled.append(losses)
 
     # tweet fig
     def mk_tweet_ax(lossname,ax,maxwidth=35):
@@ -249,13 +283,14 @@ for tweetnum in range(0,args.maxtweets):
         mk_tweet_ax(lossname,ax,maxwidth)
         lossname_modified=lossname.split('/')[-1]
         plt.tight_layout()
-        plt.savefig(args.outputdir+'/'+str(tweetnum)+'-'+lossname_modified+'.png', bbox_inches='tight')
+        plt.savefig(outputdir+'/'+basename+'-'+lossname_modified+'.'+args.format, bbox_inches='tight')
         plt.close()
 
-    mk_tweet_fig('optimization/op_loss_regularized')
-    mk_tweet_fig('lang_xentropy')
-    mk_tweet_fig('country_xentropy')
-    mk_tweet_fig('pos_loss_mix')
+    if not args.notext:
+        mk_tweet_fig('optimization/op_loss_regularized')
+        mk_tweet_fig('lang_xentropy')
+        mk_tweet_fig('country_xentropy')
+        mk_tweet_fig('pos_loss_mix')
 
     # setup plot
     fig = plt.figure(figsize=(10,7.5))
@@ -275,11 +310,12 @@ for tweetnum in range(0,args.maxtweets):
 
     # add tweet title
     ax0 = plt.subplot(gs[0,:])
-    #mk_tweet_ax('optimization/op_loss_regularized',ax0)
-    mk_tweet_ax('country_xentropy',ax0)
-    #wrappedtweet='\n'.join(textwrap.wrap(tweet['text'],60))
-    #plt.suptitle(wrappedtweet)
-    #plt.subplots_adjust(bottom=0.1)
+    if not args.notext:
+        #mk_tweet_ax('optimization/op_loss_regularized',ax0)
+        mk_tweet_ax('country_xentropy',ax0)
+        #wrappedtweet='\n'.join(textwrap.wrap(tweet['text'],60))
+        #plt.suptitle(wrappedtweet)
+        #plt.subplots_adjust(bottom=0.1)
 
     # plot densities
     def plot_density(m):
@@ -309,6 +345,9 @@ for tweetnum in range(0,args.maxtweets):
         if args.plot_res=='hi':
             nx=500
             ny=250
+        elif args.plot_res=='good':
+            nx=200
+            ny=100
         elif args.plot_res=='med':
             nx=100
             ny=50
@@ -326,7 +365,7 @@ for tweetnum in range(0,args.maxtweets):
         totalweights=np.sum(z)
         #z=z/totalweights
         z=np.log(z/totalweights+1e-10)/math.log(10)
-        levels=[-5,-4,-3,-2,-1]
+        levels=[-6,-5,-4,-3,-2]
 
         zz=np.zeros([nx,ny])
         numlevels=100
@@ -336,11 +375,49 @@ for tweetnum in range(0,args.maxtweets):
                 for i in range(0,numlevels):
                     if z[x][y] >= totalweights*10**(-i):
                         zz[x][y]=float(i)
-        #z=zz
-        #z=np.log(z/totalweights)
+
+        # helper function
+        # see: http://scipy-cookbook.readthedocs.io/items/Matplotlib_ColormapTransformations.html
+        def cmap_map(function, cmap):
+            """ Applies function (which should operate on vectors of shape 3: [r, g, b]), on colormap cmap.
+            This routine will break any discontinuous points in a colormap.
+            """
+            cdict = cmap._segmentdata
+            step_dict = {}
+            # Firt get the list of points where the segments start or end
+            for key in ('red', 'green', 'blue'):
+                step_dict[key] = list(map(lambda x: x[0], cdict[key]))
+            step_list = sum(step_dict.values(), [])
+            step_list = np.array(list(set(step_list)))
+            # Then compute the LUT, and apply the function to the LUT
+            reduced_cmap = lambda step : np.array(cmap(step)[0:3])
+            old_LUT = np.array(list(map(reduced_cmap, step_list)))
+            new_LUT = np.array(list(map(function, old_LUT)))
+            # Now try to make a minimal segment definition of the new LUT
+            cdict = {}
+            for i, key in enumerate(['red','green','blue']):
+                this_cdict = {}
+                for j, step in enumerate(step_list):
+                    if step in step_dict[key]:
+                        this_cdict[step] = new_LUT[j, i]
+                    elif new_LUT[j,i] != old_LUT[j, i]:
+                        this_cdict[step] = new_LUT[j, i]
+                colorvector = list(map(lambda x: x + (x[1], ), this_cdict.items()))
+                colorvector.sort()
+                cdict[key] = colorvector
+
+            return matplotlib.colors.LinearSegmentedColormap('colormap',cdict,1024)
 
         # plot contours
-        cmap = colors.LinearSegmentedColormap.from_list("", ['white','green','blue']) #,'yellow'])
+        #cmap = colors.LinearSegmentedColormap.from_list("", ['white','darkgreen','blue']) #,'yellow'])
+        cmap = colors.LinearSegmentedColormap.from_list("", ['#ffffff','#99ff99','#66cc66','#6699cc','#6666ff']) #,'yellow'])
+        #cdict={
+            #'red':((0.0,0.0,0.0)),
+            #'green':((0.5
+        #}
+        #cmap = colors.LinearSegmentedColormap('colormap',cdict,1024)
+
+        #cmap = cmap_map(lambda x: 4*x/2, cmap)
         norm = plt.Normalize(min(levels),max(levels))
         cs = m.contourf(
             lons,
@@ -353,14 +430,21 @@ for tweetnum in range(0,args.maxtweets):
             norm=norm
             )
         cbar = m.colorbar(cs,location='right',pad="5%")
-        cbar.set_label('log error rate')
+        cbar.ax.get_yaxis().set_ticks([])
+        for j, lab in enumerate(['0.09%','0.9%','9%','90%']):
+            cbar.ax.text(0.6, (2 * j + 1) / 8.0, lab, ha='center', va='center', rotation='vertical')
+        cbar.ax.get_yaxis().labelpad = 10
+        #cbar.set_label('Probability that the tweet is in this region')
+        cbar.set_label('Probability Mass of Plotted Region')
 
         # plot points
-        x, y = m(lon_, lat_)
-        m.scatter(x, y, marker='o',color='m',zorder=4)
+        if args.plot_true:
+            x, y = m(lon_, lat_)
+            m.scatter(x, y, marker=args.marker,color='m',zorder=4)
 
-        x, y = m(output['gps'][0,1], output['gps'][0,0])
-        m.scatter(x, y, marker='o',color='red',zorder=5)
+        if args.plot_mle:
+            x, y = m(output['gps'][0,1], output['gps'][0,0])
+            m.scatter(x, y, marker=args.marker,color='blue',zorder=5)
 
         if args.plot_mu:
             x, y = m(pre_mu_gps[1,:], pre_mu_gps[0,:])
@@ -404,10 +488,10 @@ for tweetnum in range(0,args.maxtweets):
 
     m2=Basemap(
         projection='merc',
-        llcrnrlat=input['gps_'][0]-16,
-        urcrnrlat=input['gps_'][0]+16,
-        llcrnrlon=input['gps_'][1]-16,
-        urcrnrlon=input['gps_'][1]+16,
+        llcrnrlat=input['gps_'][0]-7,
+        urcrnrlat=input['gps_'][0]+13,
+        llcrnrlon=input['gps_'][1]-10,
+        urcrnrlon=input['gps_'][1]+10,
         fix_aspect=False,
         #lat_0=input['gps_'][0],
         #lon_0=input['gps_'][1],
@@ -433,6 +517,7 @@ for tweetnum in range(0,args.maxtweets):
         labels.append(label)
         val=output['country_softmax'][0,:][sorted_countries[i]]
         vals.append(val)
+        print('  label=',label,'; val=',val)
     y_pos = np.arange(args.plot_numbars)
     ax20.barh(y_pos, vals, align='center', color='green', ecolor='black')
     ax20.set_yticks(y_pos)
@@ -472,5 +557,61 @@ for tweetnum in range(0,args.maxtweets):
 
     # save
     #plt.tight_layout()
-    plt.savefig(args.outputdir+'/'+str(tweetnum)+'.png', bbox_inches='tight')
+    plt.savefig(outputdir+'/'+basename+'.'+args.format, bbox_inches='tight')
+
+    extent = ax10.get_window_extent().transformed(fig.dpi_scale_trans.inverted())
+    extent.x1+=0.9
+    extent.y0-=0.1
+    plt.savefig(outputdir+'/'+basename+'-world.'+args.format, bbox_inches=extent)
+
+    extent = ax11.get_window_extent().transformed(fig.dpi_scale_trans.inverted())
+    extent.x1+=0.6
+    extent.y0-=0.1
+    plt.savefig(outputdir+'/'+basename+'-zoom.'+args.format, bbox_inches=extent)
+    plt.savefig(outputdir+'/'+basename+'-zoom.png', bbox_inches=extent)
+    plt.savefig(outputdir+'/'+basename+'-zoom.eps', bbox_inches=extent)
+    plt.savefig(outputdir+'/'+basename+'-zoom.pgf', bbox_inches=extent)
+
+    extent = ax20.get_window_extent().transformed(fig.dpi_scale_trans.inverted())
+    extent.x0-=0.1
+    extent.y0-=0.1
+    plt.savefig(outputdir+'/'+basename+'-bar-country.'+args.format, bbox_inches=extent)
+
+    extent = ax21.get_window_extent().transformed(fig.dpi_scale_trans.inverted())
+    extent.x0-=0.3
+    extent.y0-=0.2
+    plt.savefig(outputdir+'/'+basename+'-bar-lang.'+args.format, bbox_inches=extent)
+
     plt.close()
+
+    # specialized country plot
+    plt.rcParams.update({'pgf.rcfonts':False})
+    fig,ax = plt.subplots(figsize=(3.5,0.7))
+    countries=output['country_softmax'][0,:]
+    sorted_countries=np.flip(np.argsort(countries),axis=0)
+    labels=[]
+    vals=[]
+    plt.xticks(fontsize=8)#,fontname = "FreeSerif")
+    plt.yticks(fontsize=8)#,fontname = "FreeSerif")
+    for i in range(0,args.plot_numbars):
+        label=''
+        #if sorted_countries[i]==input['country_'][0]:
+            #label+='*'
+        label+=myhash.country_code2name(myhash.int2country(sorted_countries[i]))
+        labels.append(''+label)
+        val=output['country_softmax'][0,:][sorted_countries[i]]
+        vals.append(val)
+        print('  label=',label,'; val=',val)
+    y_pos = np.arange(args.plot_numbars)
+    ax.barh(y_pos, vals, align='center', color='green', ecolor='black')
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(labels)
+    ax.invert_yaxis()
+    ax.spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+    ax.set_xlim([0,1])
+    #ax.set_ylabel('Country')
+    #plt.tight_layout()
+    plt.gcf().subplots_adjust(bottom=0.35,left=0.3)
+    plt.savefig(outputdir+'/'+basename+'-bar-country2.'+args.format)
+

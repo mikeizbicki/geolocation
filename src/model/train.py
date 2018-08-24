@@ -18,7 +18,7 @@ parser.add_argument('--log_dir',type=str,default='log')
 parser.add_argument('--log_name',type=str,default=None)
 parser.add_argument('--stepsave',type=int,default=10000)
 parser.add_argument('--seed',type=int,default=0)
-parser.add_argument('--stagingarea',type=bool,default=True)
+parser.add_argument('--no_staging_area',action='store_true')
 
 # debug variables
 parser.add_argument('--no_checkpoint',action='store_true')
@@ -31,8 +31,10 @@ parser.add_argument('--data_summary',type=str,default=None)
 parser.add_argument('--data_sample',choices=['uniform','fancy'],default='uniform')
 parser.add_argument('--data_style',choices=['online','batch'],default='batch')
 parser.add_argument('--max_open_files',type=int,default=96)
-parser.add_argument('--initial_weights',type=str,default=None)
 parser.add_argument('--multiepoch',action='store_true')
+
+parser.add_argument('--initial_weights',type=str,default=None)
+parser.add_argument('--train_list',type=str,nargs='*',default=None)
 
 import model
 model.update_parser(parser)
@@ -137,11 +139,12 @@ for device in cuda_devices:
                 #'loc_' : tf.placeholder(tf.int64, [args.batchsize,1],name='loc_'),
                 'newuser_' : tf.placeholder(tf.float32, [args.batchsize,1],name='newuser_'),
                 #'hash_' : tf.sparse_placeholder(tf.float32,name='hash_'),
+                'lang_' : tf.placeholder(tf.int32, [args.batchsize,1], 'lang_'),
             }
             if 'time' in args.input:
                 device_inputs[device]['timestamp_ms_'] = tf.placeholder(tf.float32, [args.batchsize,1], name='timestamp_ms_')
-            if 'lang' in args.input:
-                device_inputs[device]['lang_'] = tf.placeholder(tf.int32, [args.batchsize,1], 'lang_')
+            #if 'lang' in args.input:
+                #device_inputs[device]['lang_'] = tf.placeholder(tf.int32, [args.batchsize,1], 'lang_')
             if 'cnn' in args.input:
                 device_inputs[device]['text_'] =  tf.placeholder(tf.float32, [args.batchsize,model.tweetlen,args.cnn_vocabsize],name='text_')
             if 'bow' in args.input:
@@ -150,7 +153,7 @@ for device in cuda_devices:
                 else:
                     device_inputs[device]['hash_'] = tf.sparse_placeholder(tf.float32,name='hash_')
 
-        if args.staging_area:
+        if not args.no_staging_area:
             device_input_queue[device]=tf.contrib.staging.StagingArea(
                 dtypes=map(lambda x: x.dtype, device_inputs[device].values()),
                 shapes=map(lambda x: x.get_shape(), device_inputs[device].values()),
@@ -188,8 +191,20 @@ for device in cuda_devices:
             elif args.optimizer=='sgd':
                 optimizer = tf.train.MomentumOptimizer(learningrate,args.momentum)
 
+            if args.train_list is None:
+                trainable_vars=tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+            else:
+                trainable_vars=[]
+                print('trainable variables:')
+                for v in tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES):
+                    for r in args.train_list:
+                        if r in v.name:
+                            print('  ',v.name)
+                            trainable_vars.append(v)
+
             gradients, variables = zip(*optimizer.compute_gradients(
                 device_loss_reg[device],
+                var_list=trainable_vars,
                 #colocate_gradients_with_ops=True,
                 ))
             device_grads_summary[device]=sum(map(lambda x: tf.reduce_sum(x),gradients))
@@ -576,17 +591,17 @@ while True:
     if not args.repeat_batch or stats_step['count']==0:
         feed_dict={}
         for device in cuda_devices:
-            device_dict=mp_queue.get()
             queue_size=mp_queue.qsize()
             if queue_size<5:
                 print('mp_queue.qsize()=',mp_queue.qsize())
+            device_dict=mp_queue.get()
             for k,v in device_dict.iteritems():
                 feed_dict['input'+device+'/'+k]=v
     decoding_time_stop=time.time()
     stats_step['decoding_time']+=decoding_time_stop-decoding_time_start
     stats_epoch['decoding_time']+=decoding_time_stop-decoding_time_start
 
-    if firstLoop:
+    if firstLoop and not args.no_staging_area:
         sess.run(device_input_queue_enqueue,feed_dict=feed_dict)
         firstLoop=False
         continue
@@ -606,7 +621,7 @@ while True:
     # run the model
     run_time_start=time.time()
     if record_summary:
-        print('feed_dict.keys()=',feed_dict.keys())
+        #print('feed_dict.keys()=',feed_dict.keys())
         _a,_b,_c,summary_str = sess.run(
             [ train_op , op_summaries, device_input_queue_enqueue, summary ]
             , feed_dict=feed_dict

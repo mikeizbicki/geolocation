@@ -65,7 +65,9 @@ elconfidencial=['@elconfidencial']
 #muertos=['d\\u00eda de muertos','d\\u00eda de los muertos','D\\u00eda de Muertos','D\\u00eda de los Muertos','d\\u00edade','D\\u00edaDe']
 muertos=['de muertos','de Muertos','demuertos','DeMuertos']
 
-queries=dothraki
+galician=['adeus','grazas','espello','benvido','desculpe']
+
+queries=galician
 
 import unicodedata
 standardize = lambda str: unicodedata.normalize('NFKC',unicode(str.lower()))
@@ -84,6 +86,7 @@ for path_date in os.listdir(args.data):
             files_all.append(os.path.join(path_date_full,path_hour))
 files_all.sort()
 files_all=list(reversed(files_all))
+files_all=filter(lambda x: x[-3:]=='.gz',files_all)
 
 # loop through files
 import simplejson as json
@@ -103,6 +106,7 @@ while len(files_all)>0:
 
     # perform tests
     for q in queries:
-        if q in standardize(tweet['text']):
-            print(nextline)
-
+        if tweet['lang']=='es':
+            if q in standardize(tweet['text']):
+                #print(nextline)
+                print(tweet['id'],tweet['lang'],tweet['text'].encode('utf-8'))

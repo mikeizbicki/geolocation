@@ -16,6 +16,7 @@ parser=argparse.ArgumentParser('infer using a model')
 
 parser.add_argument('--models',type=str,nargs='*',required=True)
 parser.add_argument('--outdir',type=str,default='img/tables')
+parser.add_argument('--burnin',type=int,default=0)
 
 args = parser.parse_args()
 
@@ -24,6 +25,7 @@ print('importing libraries')
 import tensorflow as tf
 import datetime
 import pprint
+import math
 
 ########################################
 print('looping through event files')
@@ -31,6 +33,8 @@ print('looping through event files')
 results_sum={}
 results_tot={}
 def update_results(xs,v):
+    if math.isnan(v):
+        return
     def local_func(xs,v,retdict):
         if xs[0] in retdict:
             if len(xs)==1:
@@ -68,11 +72,12 @@ for modeldir in args.models:
         i=0
         for event in tf.train.summary_iterator(events_file):
             i+=1
-            for value in event.summary.value:
-                if value.HasField('simple_value'):
-                    #print('tag=',value.tag.split('/'),'; simple_value=',value.simple_value)
-                    tags=value.tag.split('/')
-                    update_results([tags[0]]+[modeldir]+tags[1:],value.simple_value)
+            if i>args.burnin:
+                for value in event.summary.value:
+                    if value.HasField('simple_value'):
+                        #print('tag=',value.tag.split('/'),'; simple_value=',value.simple_value)
+                        tags=value.tag.split('/')
+                        update_results([tags[0]]+[modeldir]+tags[1:],value.simple_value)
 
             if i%100==0:
                 print(datetime.datetime.now(),'i=',i)
@@ -84,12 +89,11 @@ for tag in results_sum.keys():
     #if 'all' in tag or 'filter' in tag:
         #pprint.pprint(results_sum[tag])
         #sys.exit(0)
-    try:
         with open(args.outdir+'/'+tag+'.tex','w') as f:
             f.write('''
-\\begin{tabular}{l|c|cccccccc}
-& average &\multicolumn{8}{c}{accuracy} \\\\
-model & distance (km) & @country & @10km & @50km & @100km & @500km & @1000km & @2000km & @3000km \\\\
+\\begin{tabular}{l|c|ccccccc}
+& average &\multicolumn{7}{c}{accuracy} \\\\
+model & distance (km) & @50km & @100km & @500km & @1000km & @2000km & @3000km & @country \\\\
 \\hline
 \\hline
 ''')
@@ -100,14 +104,17 @@ model & distance (km) & @country & @10km & @50km & @100km & @500km & @1000km & @
                 f.write(modelname)
                 f.write(' & ')
                 results=[]
-                for key in ['dist','country_acc']:
-                    results.append(get_results([tag,model,key]))
-                for key in ['k10','k50','k100','k500','k1000','k2000','k3000']:
-                    results.append(1.0-get_results([tag,model,key]))
-                f.write(' & '.join(map(lambda x: '%.2f'%x,results)))
-                f.write(' \\\\\n ')
+                try:
+                    #for key in ['dist','country_acc']:
+                    results.append(get_results([tag,model,'dist']))
+                    for key in ['k50','k100','k500','k1000','k2000','k3000']:
+                        results.append(1.0-get_results([tag,model,key]))
+                    results.append(get_results([tag,model,'country_acc']))
+                    f.write(' & '.join(map(lambda x: '%.3f'%x,results)))
+                    f.write(' \\\\\n ')
+                except Exception as e:
+                    f.write('--&--&--&--&--&--&--&--&-- \\ \n')
+                    #print('failed for tag=',tag, 'error=',e)
             f.write('\\end{tabular}')
-    except Exception as e:
-        print('failed for tag=',tag, 'error=',e)
 
 

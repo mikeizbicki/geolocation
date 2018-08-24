@@ -54,7 +54,8 @@ def update_parser(parser):
     parser.add_argument('--gmm_prekappa0',type=float,default=10.0)
     parser.add_argument('--gmm_maxprob',type=float,default=None)
     parser.add_argument('--gmm_distloss',action='store_true')
-    parser.add_argument('--gmm_decomposed',type=int,nargs='*',default=[])
+    parser.add_argument('--gmm_decomposed',type=int,nargs='+',default=[])
+    parser.add_argument('--gmm_sparsity',type=int,default=None)
     parser.add_argument('--country_shortcut',choices=['bow','lang'],default=[],nargs='*')
     parser.add_argument('--loc_type',choices=['popular','myhash'],default='myhash')
     parser.add_argument('--loc_filter',action='store_true')
@@ -226,18 +227,14 @@ def inference(args,input_tensors,reuse_variables=False):
         # myhash bow inputs
         if 'bow' in args.input:
             with tf.variable_scope('bow'):
-                # FIXME: why does this need to be global?
-                #global hash_
                 bow_size=2**args.bow_hashsize
                 if args.bow_dense:
-                    #hash_ = tf.placeholder(tf.float32,[args.batchsize,bow_size],'hash_')
-                    #raise ValueError('fixme')
                     print('input_tensors.keys()=',input_tensors.keys())
                     hash_ = input_tensors['hash_']
                     matmul = tf.matmul
                     hash_reg=args.l1*tf.reduce_sum(tf.abs(hash_))
                 else:
-                    hash_ = input_tensors['hash_'] #tf.sparse_placeholder(tf.float32,name='hash_')
+                    hash_ = input_tensors['hash_']
                     matmul = tf.sparse_tensor_dense_matmul
                     hash_reg=args.l1*tf.sparse_reduce_sum(tf.abs(hash_))
                 regularizers.append(hash_reg)
@@ -640,7 +637,7 @@ def inference(args,input_tensors,reuse_variables=False):
                 # Mixture of fisher distributions
                 # see "directional statistics" by Mardia and Jupp for Fisher distribution
                 if 'aglm_mix' == args.pos_type:
-
+                  with tf.device('CPU:0'):
                     safeish_exp = lambda x: tf.exp(tf.minimum(x,30+tf.log(x+epsilon)),name='safeish_exp')
 
                     if args.pos_warmstart:
@@ -657,10 +654,15 @@ def inference(args,input_tensors,reuse_variables=False):
 
                     if args.gmm_type=='simple' or args.gmm_type=='verysimple':
                         trainable=args.gmm_type!='verysimple'
-                        pre_mu_var = mk_variable(pre_mu_gps_rad0,name='pre_mu',trainable=trainable)
+                        print('trainable=',trainable)
+                        pre_mu_var = pre_mu_gps_rad0
+                        # FIXME: trainable not working
+                        #pre_mu_var = mk_variable(pre_mu_gps_rad0,name='pre_mu',trainable=trainable)
                         pre_mu_reshape = tf.reshape(pre_mu_var,[1,args.gmm_components,2])
                         pre_mu = args.gmm_lrfactor*pre_mu_reshape+(1-args.gmm_lrfactor)*tf.stop_gradient(pre_mu_reshape)
-                        pre_kappa = mk_variable(pre_kappa_constant,name='pre_kappa',trainable=trainable)
+                        pre_kappa = pre_kappa_constant
+                        # FIXME:
+                        #pre_kappa = mk_variable(pre_kappa_constant,name='pre_kappa',trainable=trainable)
                         kappa = safeish_exp(pre_kappa)
 
                     else:
@@ -697,27 +699,67 @@ def inference(args,input_tensors,reuse_variables=False):
                                  ])
                     x_reshape = tf.reshape(x,[3,args.batchsize,1])
 
-                    def decomposed_linear_layer(input_layer,mid_layer_sizes,output_size):
-                        t={}
-                        input_layer_size=int(input_layer.get_shape()[1])
-                        with tf.variable_scope('decomposed_linear_layer'):
-                            for i in mid_layer_sizes:
-                                with tf.variable_scope('grouping_'+str(i)):
-                                    w1 = mk_variable(var_init([input_layer_size,i]),name='w1')
-                                    w2 = mk_variable(var_init([i,output_size]),name='w2')
-                                    t[i] = tf.matmul(tf.matmul(input_layer,w1),w2)
-                            with tf.variable_scope('grouping_all'):
-                                w = mk_variable(var_init([input_layer_size,output_size]),name='w')
-                                b = mk_variable(tf.constant(0.1,shape=[output_size]),name='b')
-                                t['all']=tf.matmul(input_layer,w)+b
-                            logits=sum(t.values())
-                        return logits
+                    if args.gmm_decomposed==[]:
+                        w = mk_variable(var_init([pos_final_layer_size,args.gmm_components],0.01),name='w')
+                        b = mk_variable(tf.constant(0.1,shape=[args.gmm_components]),name='b')
+                        mixture_logits = tf.matmul(pos_final_layer,w)+b
 
+                    else:
+                        def decomposed_linear_layer(input_layer,mid_layer_sizes,output_size):
+                            t={}
+                            input_layer_size=int(input_layer.get_shape()[1])
+                            with tf.variable_scope('decomposed_linear_layer'):
+                                for i in mid_layer_sizes:
+                                    with tf.variable_scope('grouping_'+str(i)):
+                                        w1 = mk_variable(var_init([input_layer_size,i]),name='w1')
+                                        w2 = mk_variable(var_init([i,output_size]),name='w2')
+                                        t[i] = tf.matmul(tf.matmul(input_layer,w1),w2)
+                                with tf.variable_scope('grouping_all'):
+                                    w = mk_variable(var_init([input_layer_size,output_size]),name='w')
+                                    b = mk_variable(tf.constant(0.1,shape=[output_size]),name='b')
+                                    t['all']=tf.matmul(input_layer,w)+b
+                                logits=sum(t.values())
+                            return logits
 
-                    w = mk_variable(var_init([pos_final_layer_size,args.gmm_components],0.01),name='w')
-                    b = mk_variable(tf.constant(0.1,shape=[args.gmm_components]),name='b')
-                    mixture_logits = tf.matmul(pos_final_layer,w)+b
-                    #mixture_logits = decomposed_linear_layer(pos_final_layer,args.gmm_decomposed,args.gmm_components)
+                        #mixture_logits = decomposed_linear_layer(pos_final_layer,args.gmm_decomposed,args.gmm_components)
+
+                        with tf.variable_scope('decomposed'):
+                            q=args.gmm_decomposed[0]
+                            input_layer=pos_final_layer
+                            input_layer_size=int(input_layer.get_shape()[1])
+                            output_size=args.gmm_components
+
+                            w1 = mk_variable(var_init([input_layer_size,q]),name='w1')
+                            b1 = mk_variable(var_init([q]),name='b1')
+                            net1 = tf.matmul(input_layer,w1)+b1
+
+                            with tf.device('CPU:0'):
+                                w2 = mk_variable(tf.zeros([q,output_size]),name='w2')
+                                b2 = mk_variable(tf.zeros([output_size]),name='b2')
+                                mixture_logits = tf.matmul(net1,w2)+b2
+
+                                if args.gmm_sparsity is None:
+                                    sparsity=args.gmm_components
+                                else:
+                                    sparsity=args.gmm_sparsity
+                                    indices=tf.random_uniform(
+                                        dtype=tf.int64,
+                                        minval=0,
+                                        maxval=output_size,
+                                        shape=[sparsity],
+                                        )
+                                    indices=tf.constant(range(0,sparsity),dtype=tf.int64)
+
+                                    mu = tf.gather(mu,indices,axis=2)
+                                    pre_mu_gps = tf.gather(pre_mu_gps,indices,axis=2)
+                                    kappa = tf.gather(kappa,indices,axis=0)
+
+                                    w2_sparse = tf.gather(w2,indices,axis=1)
+                                    b2_sparse = tf.gather(b2,indices,axis=0)
+                                    mixture_logits = tf.matmul(net1,w2_sparse)+b2_sparse
+
+                                print('sparsity=',sparsity)
+
                     mixture = tf.nn.softmax(mixture_logits + epsilon) + epsilon
 
                     #safe_logsinh = lambda x: tf.where(
@@ -753,31 +795,33 @@ def inference(args,input_tensors,reuse_variables=False):
                     op_metrics['optimization/aglm_mix']=(args.batchsize,loss)
 
                     with tf.variable_scope('summaries'):
-                        vals,indices=tf.nn.top_k(mixture,k=args.gmm_components)
-                        mixture_sum=tf.reduce_mean(tf.reduce_sum(mixture,axis=1))
+                        with tf.device('CPU:0'):
+                            vals,indices=tf.nn.top_k(mixture,k=sparsity) #args.gmm_components)
+                            mixture_sum=tf.reduce_mean(tf.reduce_sum(mixture,axis=1))
 
-                        def summarize_vector(v,n):
-                            with tf.variable_scope(n):
-                                op_metrics['mix/'+n+'/max']=tf.reduce_max(v)
-                                op_metrics['mix/'+n+'/min']=tf.reduce_min(v)
-                                op_metrics['mix/'+n+'/mean']=tf.reduce_mean(v)
+                            def summarize_vector(v,n):
+                                with tf.variable_scope(n):
+                                    op_metrics['mix/'+n+'/max']=tf.reduce_max(v)
+                                    op_metrics['mix/'+n+'/min']=tf.reduce_min(v)
+                                    op_metrics['mix/'+n+'/mean']=tf.reduce_mean(v)
 
-                        summarize_vector(pre_kappa,'pre_kappa')
-                        summarize_vector(logits,'logits')
-                        summarize_vector(w,'w')
-                        try:
-                            summarize_vector(pow,'pow')
-                        except:
-                            pass
+                            summarize_vector(pre_kappa,'pre_kappa')
+                            summarize_vector(logits,'logits')
+                            summarize_vector(w,'w')
+                            try:
+                                summarize_vector(pow,'pow')
+                            except:
+                                pass
 
-                        op_metrics['mix/sum']=mixture_sum
+                            op_metrics['mix/sum']=mixture_sum
 
-                        for k in [0,1,2]:
-                            topk=vals[:,min(k,args.gmm_components-1)]
-                            op_metrics['mix/top'+str(k)+'_loss']=topk
-                        for p in [0.0,0.25,0.50,0.75]:
-                            topp=vals[:,int((1.0-p)*args.gmm_components)-1]
-                            op_metrics['mix/percentile_'+str(p)]=topp
+                            for k in [0,1,2]:
+                                topk=vals[:,min(k,args.gmm_components-1)]
+                                op_metrics['mix/top'+str(k)+'_loss']=topk
+                            for p in [0.0,0.25,0.50,0.75]:
+                                #topp=vals[:,int((1.0-p)*args.gmm_components)-1]
+                                topp=vals[:,int((1.0-p)*sparsity)-1]
+                                op_metrics['mix/percentile_'+str(p)]=topp
 
                     main_component=mixture
                     main_component=tf.where(
@@ -785,7 +829,8 @@ def inference(args,input_tensors,reuse_variables=False):
                             tf.constant(1.0, shape=mixture.shape),
                             tf.constant(0.0, shape=mixture.shape)
                             )
-                    main_component_reshape=tf.reshape(main_component,[args.batchsize,1,args.gmm_components])
+                    #main_component_reshape=tf.reshape(main_component,[args.batchsize,1,args.gmm_components])
+                    main_component_reshape=tf.reshape(main_component,[args.batchsize,1,sparsity])
 
                     gps = tf.reduce_sum(main_component_reshape*pre_mu_gps,axis=2)
                     op_lat = gps[:,0]
@@ -1111,7 +1156,13 @@ def mk_feed_dict(args,batch,suffix=':0'):
                     m2.data,
                     m2.shape,
                     )
-        feed_dict['hash_'+suffix] = mkSparseTensorValue(sp.sparse.vstack(batch_dict['hash_']))
+        if args.bow_dense:
+            feed_dict['hash_'+suffix] = mkSparseTensorValue(sp.sparse.vstack(batch_dict['hash_']))
+        else:
+            m2=sp.sparse.coo_matrix(sp.sparse.vstack(batch_dict['hash_']))
+            feed_dict['hash_/indices'+suffix] = zip(m2.row,m2.col)
+            feed_dict['hash_/values'+suffix] = m2.data
+            feed_dict['hash_/shape'+suffix] = m2.shape
 
     if 'cnn' in args.input:
         feed_dict['text_'+suffix] = np.vstack(batch_dict['text_'])

@@ -137,13 +137,14 @@ name() {
         ru) printf "Russian" ;;
         vi) printf "Vietnamese" ;;
         th) printf "Thai" ;;
+        und) printf "Unknown" ;;
         *)  printf $1 ;;
     esac
 }
 
 mksorted() {
     tmp=$(mktemp)
-    numcountries=10
+    numcountries=9
     sort "$1" -k2 -nr | head -n${numcountries} > "$tmp"
     printf "" > ${1}.sorted
     cat $tmp | while read line; do
@@ -214,7 +215,7 @@ set yrange [0:1]
 set tics front nomirror
 unset ytics
 set xlabel "\\\\scriptsize $xlabel" offset 0,0.5
-set ylabel "\\\\scriptsize fraction of tweets"
+set ylabel "Fraction of Tweets"
 set size 0.75,1
 set title 'Countries that Tweet in $(name $lang)' offset 0,-0.5
 plot '$info_time' using ($xval):(1) with filledcurve x1 lc rgb '#333333',\
@@ -298,7 +299,7 @@ plot "$dir/country.dat.sorted" using 6:xtic(1) with boxes lc rgb '#ff0000'
 #plot "$dir/country.dat.sorted" using 0:6:2:xtic(1) with boxes lc rgb variable
 
 set output "img/lang.tex"
-set title "Most Active Languages" offset 0,-2
-plot "$dir/lang.dat.sorted" using 6:xtic(1) with boxes lc rgb '#ff0000'
+set title "" offset 0,-2
+plot "$dir/lang.dat.sorted" using 6:xtic(1) with boxes lc rgb '#9999ff'
 #plot "$dir/lang.dat.sorted" using 0:6:2:xtic(1) with boxes lc rgb variable
 EOF

@@ -199,6 +199,33 @@ def softmax2country(x):
     import numpy as np
     return int2country(np.argmax(x))
 
+def country_code2name(code):
+    if code=='MX':
+        return 'Mexico'
+    elif code=='ES':
+        return 'Spain'
+    elif code=='AR':
+        return 'Argentina'
+    elif code=='KW':
+        return 'Kuwait'
+    elif code=='SA':
+        return 'Saudi Arabia'
+    elif code=='EG':
+        return 'Egypt'
+    elif code=='JP':
+        return 'Japan'
+    elif code=='AE':
+        return 'Arab Emirates'
+    elif code=='BH':
+        return 'Bahrain'
+    elif code=='TR':
+        return 'Turkey'
+    elif code=='SD':
+        return 'Sudan'
+    elif code=='US':
+        return 'United States'
+    return code
+
 ################################################################################
 
 def init_loc_hash(args):
