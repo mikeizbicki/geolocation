@@ -574,6 +574,7 @@ def inference(args,input_tensors,reuse_variables=False):
 
         # position based losses
         if 'pos' in args.output:
+          with tf.device('CPU:0'):
             gps_=input_tensors['gps_']
 
             with tf.variable_scope('pos'):

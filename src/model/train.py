@@ -205,7 +205,7 @@ for device in cuda_devices:
             gradients, variables = zip(*optimizer.compute_gradients(
                 device_loss_reg[device],
                 var_list=trainable_vars,
-                #colocate_gradients_with_ops=True,
+                colocate_gradients_with_ops=True,
                 ))
             device_grads_summary[device]=sum(map(lambda x: tf.reduce_sum(x),gradients))
             #gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
