@@ -216,8 +216,8 @@ for tweetnum in range(0,args.maxtweets):
 
     pre_kappa=output['aglm_mix/pre_kappa']
     kappa=output['aglm_mix/kappa']
-    #pre_kappa=0.001
-    #kappa=math.exp(pre_kappa)
+    pre_kappa=10.0
+    kappa=math.exp(pre_kappa)
 
     mixture=output['aglm_mix/mixture']
     #print('mixture=',mixture)
@@ -488,15 +488,19 @@ for tweetnum in range(0,args.maxtweets):
 
     m2=Basemap(
         projection='merc',
-        llcrnrlat=input['gps_'][0]-7,
-        urcrnrlat=input['gps_'][0]+13,
-        llcrnrlon=input['gps_'][1]-10,
-        urcrnrlon=input['gps_'][1]+10,
+        #llcrnrlat=input['gps_'][0]-7,
+        #urcrnrlat=input['gps_'][0]+13,
+        #llcrnrlon=input['gps_'][1]-10,
+        #urcrnrlon=input['gps_'][1]+10,
+        llcrnrlat=input['gps_'][0]-3,
+        urcrnrlat=input['gps_'][0]+6,
+        llcrnrlon=input['gps_'][1]-5,
+        urcrnrlon=input['gps_'][1]+5,
         fix_aspect=False,
         #lat_0=input['gps_'][0],
         #lon_0=input['gps_'][1],
         #lat_ts=20,
-        resolution='l',
+        resolution='i',
         ax=ax11
         )
     plot_density(m2)

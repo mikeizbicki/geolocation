@@ -704,6 +704,7 @@ def inference(args,input_tensors,reuse_variables=False):
                         w = mk_variable(var_init([pos_final_layer_size,args.gmm_components],0.01),name='w')
                         b = mk_variable(tf.constant(0.1,shape=[args.gmm_components]),name='b')
                         mixture_logits = tf.matmul(pos_final_layer,w)+b
+                        sparsity=args.gmm_components
 
                     else:
                         def decomposed_linear_layer(input_layer,mid_layer_sizes,output_size):
