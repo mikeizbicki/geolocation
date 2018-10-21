@@ -16,6 +16,7 @@ def gps_loss_layered(
     hires_gmm_sparsity=2**13,
     hires_gmm_decomposed=[2**8],
     hires_gmm_prekappa0=12.0,
+    hires_concat_endpoints=False,
     ):
     import tensorflow as tf
     op_metrics={}
@@ -53,12 +54,10 @@ def gps_loss_layered(
             op_metrics['gps_loss_layered_debug/input_norm/min']=tf.reduce_min(input_norm)
             op_metrics['gps_loss_layered_debug/input_norm/mean']=tf.reduce_mean(input_norm)
 
-            hires_input=input
-            #hires_input=tf.concat([input,endpoints_flattened],axis=1)
-            #print('hires_input=',hires_input)
-            #print('input=',input)
-            #print('endpoints_flattened=',endpoints_flattened)
-            #asd
+            if hires_concat_endpoints:
+                hires_input=tf.concat([input,endpoints_flattened],axis=1)
+            else:
+                hires_input=input
 
         with tf.device(hires_device):
             hires_loss,hires_regularizers,hires_metrics,hires_endpoints=gps_loss(
@@ -195,26 +194,36 @@ def gps_loss(
                                    ]
                                    for city in get_cities(gmm_components)
                                  ]
-                pre_mu_gps_rad0 = tf.constant(gps_coords_rad,shape=[gmm_components,2])
+                pre_mu_gps_rad0 = tf.get_variable(
+                    name='pre_mu_gps_rad0',
+                    initializer=tf.constant(gps_coords_rad,shape=[gmm_components,2]),
+                    trainable=False
+                    )
                 pre_mu_tan = tf.tan(pre_mu_gps_rad0)
             else:
                 pre_mu_gps0 = 0.1
-            pre_kappa_constant = tf.constant(gmm_prekappa0,shape=[gmm_components])
+            pre_kappa_constant = tf.get_variable(
+                name='pre_kappa_constant',
+                initializer=tf.constant(gmm_prekappa0,shape=[gmm_components]),
+                trainable=False
+                )
 
             if gmm_type=='simple':
-                pre_mu_gps_rad0_reshape=tf.reshape(pre_mu_gps_rad0,[1,gmm_components,2])
                 pre_mu_var = tf.get_variable(
                     name='pre_mu',
-                    initializer=tf.zeros(shape=pre_mu_gps_rad0_reshape.get_shape()),
+                    initializer=tf.zeros(shape=pre_mu_gps_rad0.get_shape()),
                     trainable=trainable_mu,
                     )
-                pre_mu=pre_mu_gps_rad0_reshape+pre_mu_var
+                #pre_mu_var=0.0
+                pre_mu=tf.reshape(pre_mu_gps_rad0+pre_mu_var,[1,gmm_components,2])
 
                 pre_kappa_var = tf.get_variable(
                     name='pre_kappa',
                     initializer=tf.zeros(shape=pre_kappa_constant.get_shape()),
                     trainable=trainable_kappa,
                     )
+                #pre_kappa_var=0.0
+                pre_kappa = pre_kappa_constant+pre_kappa_var
                 pre_kappa = pre_kappa_constant+pre_kappa_var
                 kappa = safeish_exp(pre_kappa)
 
@@ -259,7 +268,8 @@ def gps_loss(
 
             if gmm_decomposed==[]:
                 w = mk_variable(
-                    var_init([pos_final_layer_size,gmm_components],0.01),
+                    #var_init([pos_final_layer_size,gmm_components],0.01),
+                    var_init([gmm_components,pos_final_layer_size],0.01),
                     name='w',
                     trainable=trainable_weights
                     )
@@ -268,7 +278,8 @@ def gps_loss(
                     name='b',
                     trainable=trainable_weights
                     )
-                mixture_logits = tf.matmul(pos_final_layer,w)+b
+                #mixture_logits = tf.matmul(pos_final_layer,w)+b
+                mixture_logits = tf.transpose(tf.matmul(w,tf.transpose(pos_final_layer)))+b
                 sparsity=gmm_components
                 op_endpoints['mixture_logits']=mixture_logits
 
@@ -375,8 +386,92 @@ def gps_loss(
 
             with tf.variable_scope('summaries'):
                 with tf.device('CPU:0'):
-                    vals,indices=tf.nn.top_k(mixture,k=sparsity) #args.gmm_components)
+                    vals,indices=tf.nn.top_k(mixture,k=sparsity)
                     mixture_sum=tf.reduce_mean(tf.reduce_sum(mixture,axis=1))
+                    op_metrics['gps_loss_debug/sum']=mixture_sum
+
+                    with tf.variable_scope('streaming_mixture'):
+                      #if False: #FIXME
+                        mixture_reduced=tf.reduce_mean(mixture,axis=0)
+                        mixture_sm=tf.get_variable(
+                            initializer=tf.constant(1.0/gmm_components,shape=mixture_reduced.get_shape()),
+                            name='mixture_sm',
+                            trainable=False
+                            )
+                        mixture_update=tf.group(
+                            tf.assign(mixture_sm,0.9*mixture_sm+0.1*mixture_reduced),
+                            )
+                        tf.add_to_collection('gps_loss_updates',mixture_update)
+
+                        with tf.variable_scope('splitter'):
+                            splitter_k=int(gmm_components*0.001)
+                            hi_v,hi_i=tf.nn.top_k(mixture_sm,k=splitter_k)
+                            lo_v,lo_i=tf.nn.top_k(-mixture_sm,k=splitter_k)
+
+                            print('lo_i=',lo_i)
+                            pre_mu_gps_rad0_hi=tf.gather(pre_mu_gps_rad0,hi_i,axis=0)
+
+                            minlo=tf.reduce_min(-lo_v)
+                            pred=tf.less(minlo,1e2/gmm_components)
+                            #pred=tf.less(minlo,1e-2/gmm_components)
+                            #print('pred=',pred)
+                            #minlo=tf.Print(minlo,[minlo,pred,tf.less(minlo,1e-5),1e-1/gmm_components],'minlo')
+                            op_metrics['gps_loss_debug/minlo']=minlo
+                            splitter=tf.cond(
+                                pred,
+                                true_fn=lambda: tf.group(
+                                    tf.scatter_update(
+                                        pre_mu_gps_rad0,
+                                        tf.Print(lo_i,[minlo,lo_i,hi_i],'splitter activated'),
+                                        pre_mu_gps_rad0_hi+tf.truncated_normal(
+                                            pre_mu_gps_rad0_hi.get_shape(),
+                                            stddev=0.01
+                                            )
+                                        ),
+                                    tf.scatter_update(
+                                        pre_mu_var,
+                                        lo_i,
+                                        tf.gather(pre_mu_var,hi_i,axis=0)
+                                        ),
+                                    tf.scatter_update(
+                                        pre_kappa_var,
+                                        lo_i,
+                                        tf.gather(pre_kappa_var,hi_i,axis=0)
+                                        ),
+                                    tf.scatter_update(
+                                        pre_kappa_constant,
+                                        lo_i,
+                                        tf.gather(pre_kappa_constant,hi_i,axis=0)+1
+                                        ),
+                                    tf.scatter_update(
+                                        pre_kappa_constant,
+                                        hi_i,
+                                        tf.gather(pre_kappa_constant,hi_i,axis=0)+1
+                                        ),
+                                    tf.scatter_update(
+                                        w,
+                                        lo_i,
+                                        tf.gather(w,hi_i,axis=0)
+                                        ),
+                                    tf.scatter_update(
+                                        b,
+                                        lo_i,
+                                        tf.gather(b,hi_i,axis=0)
+                                        ),
+                                    tf.scatter_update(
+                                        mixture_sm,
+                                        lo_i,
+                                        tf.gather(mixture_sm,hi_i,axis=0)/2
+                                        ),
+                                    tf.scatter_update(
+                                        mixture_sm,
+                                        hi_i,
+                                        tf.gather(mixture_sm,hi_i,axis=0)/2
+                                        ),
+                                    ),
+                                false_fn=lambda: tf.group()
+                                )
+                            tf.add_to_collection('gps_loss_splitter',splitter)
 
                     def summarize_vector(v,n):
                         with tf.variable_scope(n):
@@ -387,13 +482,13 @@ def gps_loss(
                     summarize_vector(tf.abs(pre_kappa_var),'pre_kappa_var_abs')
                     summarize_vector(tf.abs(pre_mu_var),'pre_mu_var_abs')
                     summarize_vector(mixture_logits,'mixture_logits')
+                    summarize_vector(mixture,'mixture')
                     #summarize_vector(w,'w')
                     try:
+                        summarize_vector(mixture_sm,'mixture_sm')
                         summarize_vector(pow,'pow')
                     except:
                         pass
-
-                    op_metrics['gps_loss_debug/sum']=mixture_sum
 
                     for k in [0,1,2]:
                         topk=vals[:,min(k,gmm_components-1)]

@@ -26,6 +26,7 @@ parser.add_argument('--cyclelength',type=int,default=79)
 parser.add_argument('--shufflemul',type=int,default=20)
 
 parser.add_argument('--initial_weights',type=str,default=None)
+parser.add_argument('--reset_global_step',action='store_true')
 
 # hyperparams
 parser.add_argument('--optimizer',choices=['Adam','RMSProp'],default='Adam')
@@ -55,6 +56,7 @@ parser.add_argument('--pretrain',action='store_true')
 parser.add_argument('--train_only_last_until_step',type=float,default=0.0)
 parser.add_argument('--gmm_type',choices=['simple','verysimple'],default='simple')
 parser.add_argument('--gmm_minimizedist',action='store_true')
+parser.add_argument('--gmm_splitter',action='store_true')
 
 def boolean_string(s):
     if s not in {'False', 'True'}:
@@ -64,6 +66,7 @@ parser.add_argument('--trainable_mu',type=boolean_string,default=False)
 parser.add_argument('--trainable_kappa',type=boolean_string,default=False)
 parser.add_argument('--trainable_weights',type=boolean_string,default=True)
 parser.add_argument('--lores_gmm_prekappa0',type=float,default=10.0)
+parser.add_argument('--hires_gmm_prekappa0',type=float,default=12.0)
 
 args = parser.parse_args()
 
@@ -222,6 +225,10 @@ if args.initial_weights:
     restore('')
     print('  model restored from ',args.initial_weights)
 
+if args.reset_global_step:
+    print('  reset global step')
+    sess.run(tf.assign(global_step,0))
+
 ########################################
 print('training loop')
 sess.graph.finalize()
@@ -237,10 +244,21 @@ while True:
         # perform one training step
         if res_step<=args.train_only_last_until_step:
             train_op=train_op_lastlayers
+            train_op_msg='last layers'
         else:
             train_op=train_op_alllayers
+            train_op_msg='all layers'
 
-        res_loss,_=sess.run([loss_regularized,[train_op,op_summaries]])
+        #res_loss,_=sess.run([loss_regularized,[train_op,op_summaries]])
+        res_loss,_=sess.run([
+            loss_regularized,
+            [ train_op,
+              op_summaries,
+              tf.get_collection('gps_loss_updates'),
+              #[tf.get_collection('gps_loss_splitter')],
+              [tf.get_collection('gps_loss_splitter')] if local_step%100==0 and local_step>=1000 and args.gmm_splitter else [],
+            ]
+            ])
 
         # record summaries occasionally
         if (
@@ -255,14 +273,16 @@ while True:
             summary_writer.flush()
             sess.run(reset_local_vars)
 
-            print('%s  step=%d  loss=%g' %
+            print('%s  step=%d (%d) loss=%g  %s' %
                 ( datetime.datetime.now()
                 , res_step
+                , local_step
                 , res_loss
+                , train_op_msg
                 ))
 
         # save model occasionally
-        if (res_step in [1,100,1000] or res_step%args.step_save == 0):
+        if (local_step in [1,100,1000] or res_step%args.step_save == 0):
             checkpoint_file = os.path.join(log_dir, 'step.ckpt')
             saver_step.save(sess, checkpoint_file, global_step=res_step)
 

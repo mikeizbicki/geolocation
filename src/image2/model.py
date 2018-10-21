@@ -170,6 +170,8 @@ def mkModel(args,image_,country_,gps_,is_training,gmm_log2=False):
             lores_gmm_prekappa0=args.lores_gmm_prekappa0,
             gmm_minimizedist=args.gmm_minimizedist,
             gmm_log2=gmm_log2,
+            hires_concat_endpoints=True,
+            hires_gmm_prekappa0=args.hires_gmm_prekappa0,
             )
         op_metrics['optimization/loss_gps']=loss_gps
         loss+=loss_gps
@@ -192,10 +194,10 @@ def mkModel(args,image_,country_,gps_,is_training,gmm_log2=False):
             gmm_log2=gmm_log2,
             #lores_device='GPU:1',
             #hires_device='GPU:1',
-            hires_gmm_components=2**18,
+            hires_gmm_components=2**17,
             hires_gmm_sparsity=None, #2**16,
             hires_gmm_decomposed=[],
-            hires_gmm_prekappa0=12.0,
+            hires_gmm_prekappa0=args.hires_gmm_prekappa0,
             )
         op_metrics['optimization/loss_gps']=loss_gps
         loss+=loss_gps
