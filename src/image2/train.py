@@ -18,12 +18,12 @@ parser.add_argument('--log_dir',type=str,default='log')
 parser.add_argument('--log_name',type=str,default=None)
 parser.add_argument('--step_save',type=int,default=10000)
 parser.add_argument('--seed',type=int,default=0)
+parser.add_argument('--features_file',type=str,default=None)
 
 parser.add_argument('--inputs',choices=['middles_all','middles_last','model'],default=['middles_last'],nargs='*')
-parser.add_argument('--outputs',choices=['gps','gps2','gps2b','country'],default=['gps','country'],nargs='+')
-
-parser.add_argument('--cyclelength',type=int,default=79)
-parser.add_argument('--shufflemul',type=int,default=20)
+parser.add_argument('--outputs',choices=['gps','gps2','gps2b','s2classes','country'],default=['gps','country'],nargs='+')
+parser.add_argument('--s2classes',type=str,default=None)
+parser.add_argument('--input_format',type=str,choices=['jpg','tfrecord'])
 
 parser.add_argument('--initial_weights',type=str,default=None)
 parser.add_argument('--reset_global_step',action='store_true')
@@ -31,6 +31,7 @@ parser.add_argument('--reset_global_step',action='store_true')
 # hyperparams
 parser.add_argument('--optimizer',choices=['Adam','RMSProp'],default='Adam')
 parser.add_argument('--batchsize',type=int,default=64)
+parser.add_argument('--shufflemul',type=int,default=20)
 parser.add_argument('--learningrate',type=float,default=1e-4)
 parser.add_argument('--l2',type=float,default=1e-5)
 parser.add_argument('--l2gps',type=float,default=1e-5)
@@ -56,6 +57,8 @@ parser.add_argument('--pretrain',action='store_true')
 parser.add_argument('--train_only_last_until_step',type=float,default=0.0)
 parser.add_argument('--gmm_type',choices=['simple','verysimple'],default='simple')
 parser.add_argument('--gmm_minimizedist',action='store_true')
+parser.add_argument('--gmm_xentropy',action='store_true')
+parser.add_argument('--gmm_no_logloss',action='store_true')
 parser.add_argument('--gmm_splitter',action='store_true')
 
 def boolean_string(s):
@@ -96,15 +99,36 @@ global_step=tf.train.create_global_step()
 ########################################
 print('creating model pipeline')
 
-import itertools
-hex=['1','2','3','4','5','6','7','8','9','0','a','b','c','d','e','f']
-perms=list(map(''.join,itertools.product(hex,repeat=3)))
-files=['/rhome/mizbicki/bigdata/geolocating/data/flickr/img_train/'+perm+'/*.jpg' for perm in perms]
-
 import model
-iter=model.mkDataset(args,files,is_training=True)
-file_,(gps_,country_),image_=iter.get_next()
-net,loss,loss_regularized,op_metrics=model.mkModel(args,image_,country_,gps_,is_training=True)
+is_training=args.features_file is None
+
+if args.input_format=='jpg':
+    import itertools
+    hex=['1','2','3','4','5','6','7','8','9','0','a','b','c','d','e','f']
+    perms=list(map(''.join,itertools.product(hex,repeat=3)))
+    files=['/rhome/mizbicki/bigdata/geolocating/data/flickr/img_train/'+perm+'/*.jpg' for perm in perms]
+
+    iter=model.mkDataset_jpg(args,files,is_training=is_training)
+    file_,(gps_,country_),image_=iter.get_next()
+    image_=tf.reshape(image_,[-1,model.image_size,model.image_size,3])
+    additional_features=None
+
+elif args.input_format=='tfrecord':
+    files='tmp.tfrecord'
+    iter=model.mkDataset_tfrecord_features(args,files)
+    gps_,country_,features_=iter.get_next()
+    additional_features=[features_]
+    image_=None
+
+net,loss,loss_regularized,op_metrics=model.mkModel(
+    args,
+    image_,
+    country_,
+    gps_,
+    is_training=is_training,
+    additional_features=additional_features,
+    )
+
 
 ########################################
 print('creating optimizer')
@@ -241,7 +265,38 @@ while True:
         res_step=sess.run(global_step)
         local_step+=1
 
-        # perform one training step
+        # extract features
+        if args.features_file:
+            #print('local_step=',local_step)
+            print('%s  step=%d (%d)' %
+                ( datetime.datetime.now()
+                , res_step
+                , local_step
+                ))
+            try:
+                writer
+            except:
+                writer=tf.python_io.TFRecordWriter(args.features_file)
+
+            gps,country,features=sess.run([gps_,country_,net])
+
+            #print('gps=',gps.shape)
+            #print('gps_=',gps_)
+            #print('country=',country.shape)
+            #print('country_=',country_)
+            #print('features=',features.shape)
+            #print('net=',net)
+            for i in range(0,args.batchsize):
+                feature = {
+                    'train/gps': tf.train.Feature(float_list=tf.train.FloatList(value=gps[i,:])),
+                    'train/country': tf.train.Feature(float_list=tf.train.FloatList(value=[country[i]])),
+                    'train/features': tf.train.Feature(float_list=tf.train.FloatList(value=features[i,:])),
+                }
+                example = tf.train.Example(features=tf.train.Features(feature=feature))
+                writer.write(example.SerializeToString())
+            continue
+
+        # select training op
         if res_step<=args.train_only_last_until_step:
             train_op=train_op_lastlayers
             train_op_msg='last layers'
@@ -292,6 +347,9 @@ while True:
         checkpoint_file = os.path.join(log_dir, 'epoch.ckpt')
         saver_epoch.save(sess, checkpoint_file, global_step=local_epoch)
         sess.run(iter.initializer)
+
+        if args.features_file:
+            sys.exit(0)
 
     except Exception as e:
         sys.stderr.write('Exception: '+str(e)+'\n')

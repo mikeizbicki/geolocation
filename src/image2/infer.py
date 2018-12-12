@@ -14,11 +14,13 @@ import argparse
 parser=argparse.ArgumentParser('train a model')
 
 parser.add_argument('--initial_weights',type=str,required=True)
-parser.add_argument('--outputdir',type=str,default='img/infer')
+parser.add_argument('--outputdir',type=str,default='log/img')
 parser.add_argument('--images',type=str,default='data/im2gps')
 parser.add_argument('--xaxis',type=str,default='local_step*args.batchsize')
 
 parser.add_argument('--lores_gmm_prekappa0',type=float,default=10.0)
+parser.add_argument('--hires_gmm_prekappa0',type=float,default=12.0)
+parser.add_argument('--gmm_xentropy',action='store_true')
 
 args = parser.parse_args()
 

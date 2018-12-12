@@ -4,7 +4,9 @@ def gps_loss_layered(
     input,
     gps_,
     gmm_type='simple',
-    gmm_minimizedist=True,
+    gmm_minimizedist=False,
+    gmm_xentropy=False,
+    gmm_logloss=True,
     gmm_log2=False,
     trainable_mu=False,
     trainable_kappa=False,
@@ -32,6 +34,8 @@ def gps_loss_layered(
                 gmm_components=2**13,
                 gmm_prekappa0=lores_gmm_prekappa0,
                 gmm_minimizedist=gmm_minimizedist,
+                gmm_xentropy=gmm_xentropy,
+                gmm_logloss=gmm_logloss,
                 gmm_log2=gmm_log2,
                 variable_scope='lores',
                 trainable_mu=trainable_mu,
@@ -70,6 +74,8 @@ def gps_loss_layered(
                 gmm_prekappa0=hires_gmm_prekappa0,
                 gmm_type=gmm_type,
                 gmm_minimizedist=gmm_minimizedist,
+                gmm_xentropy=gmm_xentropy,
+                gmm_logloss=gmm_logloss,
                 gmm_log2=gmm_log2,
                 variable_scope='hires',
                 trainable_mu=trainable_mu,
@@ -120,7 +126,10 @@ def gps_loss(
     gmm_distribution='fvm',
     gmm_distloss=False,
     gmm_minimizedist=True,
+    gmm_xentropy=False,
+    gmm_logloss=True,
     gmm_log2=False,
+    gmm_pred_multiplier=1e-2,
     variable_scope='gps_loss',
     ):
     import tensorflow as tf
@@ -267,19 +276,19 @@ def gps_loss(
             x_reshape = tf.reshape(x,[3,-1,1])
 
             if gmm_decomposed==[]:
-                w = mk_variable(
+                mixture_w = mk_variable(
                     #var_init([pos_final_layer_size,gmm_components],0.01),
                     var_init([gmm_components,pos_final_layer_size],0.01),
                     name='w',
                     trainable=trainable_weights
                     )
-                b = mk_variable(
+                mixture_b = mk_variable(
                     tf.constant(0.1,shape=[gmm_components]),
                     name='b',
                     trainable=trainable_weights
                     )
-                #mixture_logits = tf.matmul(pos_final_layer,w)+b
-                mixture_logits = tf.transpose(tf.matmul(w,tf.transpose(pos_final_layer)))+b
+                #mixture_logits = tf.matmul(pos_final_layer,mixture_w)+mixture_b
+                mixture_logits = tf.transpose(tf.matmul(mixture_w,tf.transpose(pos_final_layer)))+mixture_b
                 sparsity=gmm_components
                 op_endpoints['mixture_logits']=mixture_logits
 
@@ -317,6 +326,9 @@ def gps_loss(
                         trainable=trainable_weights
                         )
                     net1 = tf.matmul(input_layer,w1)+b1
+
+                    mixture_w=w1
+                    mixture_b=b1
 
                     #with tf.device('CPU:0'):
                     if True:
@@ -381,8 +393,45 @@ def gps_loss(
                 #log_likelihood_per_component = tf.exp(-pre_kappa*(x_reshape-mu))**pow
 
             likelihood_mixed = tf.reduce_sum(safeish_exp(log_likelihood_per_component)*mixture,axis=1)
-            log_loss = tf.reduce_mean(-tf.log(likelihood_mixed + epsilon),name='log_loss')
-            op_metrics['gps_loss/log_loss']=log_loss
+            loss_logloss = tf.reduce_mean(-tf.log(likelihood_mixed + epsilon),name='log_loss')
+            op_metrics['gps_loss/log_loss']=loss_logloss
+
+            if gmm_xentropy:
+                with tf.variable_scope('xentropy'):
+                    #print('pre_mu_gps=',pre_mu_gps)
+                    #asd
+                    op_lat = pre_mu_gps[:,0,:]
+                    op_lon = pre_mu_gps[:,1,:]
+                    op_lat_rad = op_lat/360*2*math.pi
+                    op_lon_rad = op_lon/360*math.pi
+
+                    op_lat_rad_tiled_=tf.tile(tf.reshape(op_lat_rad_,[-1,1]),[1,gmm_components])
+                    op_lon_rad_tiled_=tf.tile(tf.reshape(op_lon_rad_,[-1,1]),[1,gmm_components])
+
+                    hav = lambda x: tf.sin(x/2)**2
+                    squared_angular_dist = ( hav(op_lat_rad-op_lat_rad_tiled_)
+                        +tf.cos(op_lat_rad)*tf.cos(op_lat_rad_tiled_)*hav(op_lon_rad-op_lon_rad_tiled_)
+                        )
+
+                    op_dist = 2*6371*tf.asin(tf.sqrt(tf.maximum(0.0,squared_angular_dist)))
+
+                    class_labels=tf.one_hot(tf.argmin(squared_angular_dist,axis=1),gmm_components)
+
+                    loss_xentropy=tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits_v2(
+                        labels=tf.stop_gradient(class_labels),
+                        logits=mixture_logits
+                        ))
+
+                    op_metrics['gps_loss/xentropy']=loss_xentropy
+                    #log_loss+=xentropy/100.0
+                    #print('op_lat_rad_=',op_lat_rad_)
+                    #print('op_lat_rad=',op_lat_rad)
+                    #print('???=',(op_lat_rad-op_lat_rad_tiled_))
+                    #print('squared_angular_dist=',squared_angular_dist)
+                    #print('op_dist=',op_dist)
+                    #print('class_label=',class_label)
+                    #print('mixture=',mixture)
+                    #asd
 
             with tf.variable_scope('summaries'):
                 with tf.device('CPU:0'):
@@ -391,7 +440,6 @@ def gps_loss(
                     op_metrics['gps_loss_debug/sum']=mixture_sum
 
                     with tf.variable_scope('streaming_mixture'):
-                      #if False: #FIXME
                         mixture_reduced=tf.reduce_mean(mixture,axis=0)
                         mixture_sm=tf.get_variable(
                             initializer=tf.constant(1.0/gmm_components,shape=mixture_reduced.get_shape()),
@@ -412,10 +460,7 @@ def gps_loss(
                             pre_mu_gps_rad0_hi=tf.gather(pre_mu_gps_rad0,hi_i,axis=0)
 
                             minlo=tf.reduce_min(-lo_v)
-                            pred=tf.less(minlo,1e2/gmm_components)
-                            #pred=tf.less(minlo,1e-2/gmm_components)
-                            #print('pred=',pred)
-                            #minlo=tf.Print(minlo,[minlo,pred,tf.less(minlo,1e-5),1e-1/gmm_components],'minlo')
+                            pred=tf.less(minlo,gmm_pred_multiplier/gmm_components)
                             op_metrics['gps_loss_debug/minlo']=minlo
                             splitter=tf.cond(
                                 pred,
@@ -449,14 +494,14 @@ def gps_loss(
                                         tf.gather(pre_kappa_constant,hi_i,axis=0)+1
                                         ),
                                     tf.scatter_update(
-                                        w,
+                                        mixture_w,
                                         lo_i,
-                                        tf.gather(w,hi_i,axis=0)
+                                        tf.gather(mixture_w,hi_i,axis=0)
                                         ),
                                     tf.scatter_update(
-                                        b,
+                                        mixture_b,
                                         lo_i,
-                                        tf.gather(b,hi_i,axis=0)
+                                        tf.gather(mixture_b,hi_i,axis=0)
                                         ),
                                     tf.scatter_update(
                                         mixture_sm,
@@ -519,7 +564,8 @@ def gps_loss(
             op_outputs['aglm_mix/pre_kappa']=pre_kappa
             op_outputs['aglm_mix/kappa']=kappa
             op_outputs['aglm_mix/mixture']=mixture
-            op_outputs['aglm_mix/log_loss']=log_loss
+            op_outputs['aglm_mix/log_loss']=loss_logloss
+
         op_outputs['gps']=gps
 
         # common outputs
@@ -535,6 +581,7 @@ def gps_loss(
         # radius of earth = 3959 miles, 6371 kilometers
         op_dist = 2*6371*tf.asin(tf.sqrt(tf.maximum(0.0,squared_angular_dist)))
         op_dist_ave = tf.reduce_mean(op_dist)
+        op_metrics['gps_loss/dist']=op_dist_ave
 
         op_delta_x = tf.cos(op_lat_rad)*tf.cos(op_lon_rad)-tf.cos(op_lat_rad_)*tf.cos(op_lon_rad_)
         op_delta_y = tf.cos(op_lat_rad)*tf.sin(op_lon_rad)-tf.cos(op_lat_rad_)*tf.sin(op_lon_rad_)
@@ -544,27 +591,27 @@ def gps_loss(
         # set loss function
         #if pos_type=='naive' or pos_type=='aglm':
         if pos_loss=='l2':
-            op_loss = tf.reduce_sum((gps - gps_) * (gps - gps_))
+            loss_pos = tf.reduce_sum((gps - gps_) * (gps - gps_))
         if pos_loss=='chord':
-            op_loss = tf.reduce_mean(op_chord)
+            loss_pos = tf.reduce_mean(op_chord)
         if pos_loss=='dist':
-            op_loss = op_dist_ave
+            loss_pos = op_dist_ave
         if pos_loss=='dist2':
-            op_loss = tf.reduce_mean(op_dist*op_dist)
+            loss_pos = tf.reduce_mean(op_dist*op_dist)
         if pos_loss=='dist_sqrt':
-            op_loss = tf.reduce_mean(tf.sqrt(op_dist))
+            loss_pos = tf.reduce_mean(tf.sqrt(op_dist))
         if pos_loss=='angular':
-            op_loss = tf.reduce_sum(squared_angular_dist)
-        op_metrics['gps_loss/op_loss_unmodified']=op_loss
+            loss_pos = tf.reduce_sum(squared_angular_dist)
+        op_metrics['gps_loss/loss_pos']=loss_pos
 
         # add the log_loss when defined
-        if gmm_minimizedist and pos_type=='aglm_mix':
-            print('op_loss+=log_loss')
-            op_loss+=log_loss
-        elif pos_type=='aglm_mix':
-            op_loss=log_loss
-
-        op_metrics['gps_loss/dist']=op_dist_ave
+        op_loss=0
+        if gmm_minimizedist:
+            op_loss+=loss_pos
+        if gmm_logloss:
+            op_loss+=loss_logloss
+        if gmm_xentropy:
+            op_loss+=loss_xentropy
 
         # metrics
         op_dist_ave = tf.reduce_mean(op_dist)

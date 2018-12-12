@@ -42,11 +42,39 @@ def image10(image):
 
 ################################################################################
 
-def mkDataset(args,files,is_training):
+def mkDataset_tfrecord_features(args,files,is_training=True):
+    import tensorflow as tf
+
+    def _parse_function(example_proto):
+        features = {
+            'train/gps': tf.FixedLenFeature([2],tf.float32),
+            'train/country': tf.FixedLenFeature([],tf.float32),
+            'train/features': tf.FixedLenFeature([1000],tf.float32),
+        }
+        parsed_features = tf.parse_single_example(example_proto, features)
+        return (
+            parsed_features['train/gps'],
+            tf.cast(parsed_features['train/country'],tf.int64),
+            parsed_features['train/features'],
+            )
+
+    dataset = tf.data.TFRecordDataset(files)
+    dataset = dataset.map(_parse_function)
+
+    # generate data tensors
+    if is_training:
+        dataset=dataset.shuffle(args.batchsize*args.shufflemul,seed=args.seed)
+    dataset=dataset.batch(args.batchsize)
+    dataset=dataset.prefetch(1)
+    iter = dataset.make_initializable_iterator()
+    return iter
+    #gps_,country_,image_=iterator.get_next()
+
+
+def mkDataset_jpg(args,files,is_training):
     import tensorflow as tf
 
     with tf.variable_scope('input'):
-
         # select files
         dataset_files=tf.data.Dataset.from_tensor_slices(files)
         if is_training:
@@ -92,7 +120,7 @@ def mkDataset(args,files,is_training):
 
 ################################################################################
 
-def mkModel(args,image_,country_,gps_,is_training,gmm_log2=False):
+def mkModel(args,image_,country_,gps_,is_training,gmm_log2=False,additional_features=None):
     import tensorflow as tf
     import tensornets as nets
     import data
@@ -105,8 +133,11 @@ def mkModel(args,image_,country_,gps_,is_training,gmm_log2=False):
             country_1hot_=tf.reshape(country_1hot_,[-1,data.num_countries])
 
         with tf.variable_scope('empty_features'):
-            batchsize=tf.shape(image_)[0]
+            batchsize=args.batchsize
             features=tf.reshape(tf.tile(tf.constant([1.0]),[batchsize]),[batchsize,1])
+
+        if not additional_features is None:
+            features=tf.concat([features]+additional_features,axis=1)
 
         if not args.model is None:
             net_fn = eval('nets.'+args.model)
@@ -115,28 +146,23 @@ def mkModel(args,image_,country_,gps_,is_training,gmm_log2=False):
                 is_training=True,
                 )
 
-        if 'middles_all' in args.inputs:
-            with tf.variable_scope('middles'):
-                middles=map(tf.contrib.layers.flatten,net.get_middles())
-                features=tf.concat([features]+middles,axis=1)
+            if 'middles_all' in args.inputs:
+                with tf.variable_scope('middles'):
+                    middles=map(tf.contrib.layers.flatten,net.get_middles())
+                    features=tf.concat([features]+middles,axis=1)
 
-        if 'middles_last' in args.inputs:
-            with tf.variable_scope('middles_last'):
-                middles_last=net.get_middles()[-1]
-                pooled = tf.reduce_mean(middles_last, [1, 2], name='avgpool')
-                features=tf.concat([features,pooled],axis=1)
+            if 'middles_last' in args.inputs:
+                with tf.variable_scope('middles_last'):
+                    middles_last=net.get_middles()[-1]
+                    pooled = tf.reduce_mean(middles_last, [1, 2], name='avgpool')
+                    features=tf.concat([features,pooled],axis=1)
 
-        if 'model' in args.inputs:
-            with tf.variable_scope('net'):
-                features=tf.concat([features,net],axis=1)
+            if 'model' in args.inputs:
+                with tf.variable_scope('net'):
+                    features=tf.concat([features,net],axis=1)
 
-        #if 'yolo' in args.inputs:
-            #with tf.variable_scope('yolo'):
-
-
-    #if 'cnn' in args.inputs:
-        #pooled = tf.reduce_mean(net, [1, 2], name='avgpool')
-        #features = tf.concat([pooled,features],axis=1)
+        else:
+            net=None
 
     # create losses
     loss=0.0
@@ -151,7 +177,9 @@ def mkModel(args,image_,country_,gps_,is_training,gmm_log2=False):
             trainable_mu=args.trainable_mu,
             trainable_kappa=args.trainable_kappa,
             trainable_weights=args.trainable_weights,
+            gmm_xentropy=args.gmm_xentropy,
             gmm_minimizedist=args.gmm_minimizedist,
+            gmm_logloss=not args.gmm_no_logloss,
             gmm_log2=gmm_log2,
             )
         op_metrics['optimization/loss_gps']=loss_gps
@@ -169,6 +197,8 @@ def mkModel(args,image_,country_,gps_,is_training,gmm_log2=False):
             trainable_weights=args.trainable_weights,
             lores_gmm_prekappa0=args.lores_gmm_prekappa0,
             gmm_minimizedist=args.gmm_minimizedist,
+            gmm_xentropy=args.gmm_xentropy,
+            gmm_logloss=not args.gmm_no_logloss,
             gmm_log2=gmm_log2,
             hires_concat_endpoints=True,
             hires_gmm_prekappa0=args.hires_gmm_prekappa0,
@@ -191,6 +221,8 @@ def mkModel(args,image_,country_,gps_,is_training,gmm_log2=False):
             trainable_weights=args.trainable_weights,
             lores_gmm_prekappa0=args.lores_gmm_prekappa0,
             gmm_minimizedist=args.gmm_minimizedist,
+            gmm_xentropy=args.gmm_xentropy,
+            gmm_logloss=not args.gmm_no_logloss,
             gmm_log2=gmm_log2,
             #lores_device='GPU:1',
             #hires_device='GPU:1',
