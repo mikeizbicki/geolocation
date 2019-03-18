@@ -28,7 +28,7 @@ parser.add_argument('--plot_mu',type=bool,default=False)
 parser.add_argument('--plot_numbars',type=int,default=5)
 parser.add_argument('--overwrite',action='store_true')
 parser.add_argument('--notext',action='store_true')
-parser.add_argument('--format',type=str,choices=['png','eps','pgf'],default='png')
+parser.add_argument('--format',type=str,choices=['png','eps','pdf'],default='png')
 parser.add_argument('--marker',type=str,choices=['.','o'],default='o')
 
 args = parser.parse_args()
@@ -184,7 +184,9 @@ for tweetnum in range(0,args.maxtweets):
     # get tweet data
     tweet=json.loads(line)
     tweet['text']=model.preprocess_text(args_train,tweet['text'])
+    print('tweet=',tweet)
     input=model.json2dict(args_train,line)
+    print('input=',input)
     input['newuser_']=np.array([1])
     print('  input[gps_]=',input['gps_'])
     lat_=input['gps_'][0]

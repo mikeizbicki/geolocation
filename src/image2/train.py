@@ -19,20 +19,26 @@ parser.add_argument('--log_name',type=str,default=None)
 parser.add_argument('--step_save',type=int,default=10000)
 parser.add_argument('--seed',type=int,default=0)
 parser.add_argument('--features_file',type=str,default=None)
+parser.add_argument('--jpg_dir',type=str,default='/rhome/mizbicki/bigdata/geolocating/data/flickr/img_train/')
 
 parser.add_argument('--inputs',choices=['middles_all','middles_last','model'],default=['middles_last'],nargs='*')
-parser.add_argument('--outputs',choices=['gps','gps2','gps2b','s2classes','country'],default=['gps','country'],nargs='+')
-parser.add_argument('--s2classes',type=str,default=None)
-parser.add_argument('--input_format',type=str,choices=['jpg','tfrecord'])
+parser.add_argument('--outputs',choices=['gps','gps2','gps2b','s2','country'],default=['gps','country'],nargs='+')
+parser.add_argument('--s2size',type=int,default=12)
+parser.add_argument('--input_format',type=str,choices=['jpg','tfrecord'],default='jpg')
+parser.add_argument('--image_size',type=int,default=224)
+
 
 parser.add_argument('--initial_weights',type=str,default=None)
 parser.add_argument('--reset_global_step',action='store_true')
+parser.add_argument('--cyclelength',type=int,default=20)
 
 # hyperparams
 parser.add_argument('--optimizer',choices=['Adam','RMSProp'],default='Adam')
 parser.add_argument('--batchsize',type=int,default=64)
 parser.add_argument('--shufflemul',type=int,default=20)
 parser.add_argument('--learningrate',type=float,default=1e-4)
+parser.add_argument('--lrb',type=float,default=10.0)
+parser.add_argument('--lr_boundaries',nargs='*',type=float,default=[])
 parser.add_argument('--l2',type=float,default=1e-5)
 parser.add_argument('--l2gps',type=float,default=1e-5)
 parser.add_argument('--model',type=str,
@@ -55,11 +61,19 @@ parser.add_argument('--model',type=str,
 
 parser.add_argument('--pretrain',action='store_true')
 parser.add_argument('--train_only_last_until_step',type=float,default=0.0)
+parser.add_argument('--train_em',action='store_true')
 parser.add_argument('--gmm_type',choices=['simple','verysimple'],default='simple')
+parser.add_argument('--gmm_distribution',choices=['fvm','fvm2'],default='fvm2')
 parser.add_argument('--gmm_minimizedist',action='store_true')
 parser.add_argument('--gmm_xentropy',action='store_true')
 parser.add_argument('--gmm_no_logloss',action='store_true')
 parser.add_argument('--gmm_splitter',action='store_true')
+parser.add_argument('--gmm_components',type=int,default=8192)
+parser.add_argument('--gmm_gradient_method',choices=['all','stop','efam','main'])
+parser.add_argument('--s2warmstart_mu',action='store_true')
+parser.add_argument('--s2warmstart_kappa',action='store_true')
+parser.add_argument('--s2warmstart_kappa_s',type=float,default=0.95)
+parser.add_argument('--mu_max_meters',type=float,default=0.1)
 
 def boolean_string(s):
     if s not in {'False', 'True'}:
@@ -81,9 +95,14 @@ if args.initial_weights:
         args_str=f.readline()
 
     args=argparse.Namespace(**json.loads(args_str))
+    args.log_dir='log'
+    args.log_name=None
     args=parser.parse_args(namespace=args)
 
+args.num_crops=1
 print('args=',args)
+
+args.reset_global_step=False
 
 ########################################
 print('loading libraries')
@@ -106,59 +125,126 @@ if args.input_format=='jpg':
     import itertools
     hex=['1','2','3','4','5','6','7','8','9','0','a','b','c','d','e','f']
     perms=list(map(''.join,itertools.product(hex,repeat=3)))
-    files=['/rhome/mizbicki/bigdata/geolocating/data/flickr/img_train/'+perm+'/*.jpg' for perm in perms]
+    files=[args.jpg_dir+'/'+perm+'/*.jpg' for perm in perms]
+    #files=[args.jpg_dir+'/'+'*.jpg']
+
+    #print('files=',files)
+    #asd
 
     iter=model.mkDataset_jpg(args,files,is_training=is_training)
     file_,(gps_,country_),image_=iter.get_next()
-    image_=tf.reshape(image_,[-1,model.image_size,model.image_size,3])
-    additional_features=None
+    if is_training:
+        image_=tf.reshape(image_,[-1,1,args.image_size,args.image_size,3])
+    else:
+        image_=tf.reshape(image_,[-1,10,args.image_size,args.image_size,3])
+        image_=image_[:,4,:,:,:]
+        image_=tf.reshape(image_,[-1,1,args.image_size,args.image_size,3])
+    #image_=tf.tile(image_,[1,10,1,1,1])
+    features_=None
+    s2_=None
 
 elif args.input_format=='tfrecord':
-    files='tmp.tfrecord'
+    #files='tmp.tfrecord'
+    files=['/rhome/mizbicki/bigdata/geolocating/data/image_tfrecord/out_tfrecord_32_'+str(i) for i in range(0,32)]
+    #files='qqq'
     iter=model.mkDataset_tfrecord_features(args,files)
-    gps_,country_,features_=iter.get_next()
-    additional_features=[features_]
+    gps_,country_,features_,s2_=iter.get_next()
     image_=None
 
-net,loss,loss_regularized,op_metrics=model.mkModel(
+net,features_,loss,loss_regularized,op_metrics,op_endpoints=model.mkModel(
     args,
     image_,
     country_,
     gps_,
     is_training=is_training,
-    additional_features=additional_features,
+    features=features_,
+    s2_=s2_
     )
-
 
 ########################################
 print('creating optimizer')
 
+# set learning rate
+if len(args.lr_boundaries) > 0:
+    lr_values=[ args.learningrate/(args.lrb**i) for i in range(0,len(args.lr_boundaries)+1) ]
+    lr_boundaries=map(int,args.lr_boundaries)
+    print('lr_values=',lr_values)
+    learningrate=tf.train.piecewise_constant(
+        global_step,
+        lr_boundaries,
+        lr_values,
+        )
+else:
+    learningrate=args.learningrate
+
+op_metrics['learningrate']=learningrate
+
+# create optimizer
 if args.optimizer=='Adam':
-    optimizer = tf.train.AdamOptimizer(learning_rate=args.learningrate)
+    optimizer = tf.train.AdamOptimizer(learning_rate=learningrate)
 elif args.optimizer=='RMSProp':
-    optimizer = tf.train.RMSPropOptimizer(learning_rate=args.learningrate)
+    optimizer = tf.train.RMSPropOptimizer(learning_rate=learningrate)
 
 # create train_op for all layers
 trainable_vars=tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
-train_op_alllayers = optimizer.minimize(
-    loss_regularized,
-    global_step=global_step,
-    #colocate_gradients_with_ops=True
-    )
+#train_op_alllayers = optimizer.minimize(
+    #loss_regularized,
+    #global_step=global_step,
+    #)
+
+gvs = optimizer.compute_gradients(loss_regularized)
+gvs_clipped = []
+for grad,var in gvs:
+    if 'pre_mu' not in var.name:
+        gvs_clipped.append((grad,var))
+    else:
+        max_meters=args.mu_max_meters
+        max_grad=max_meters/6371000.0
+        grad_clipped=tf.minimum(max_grad,tf.maximum(-max_grad,grad))
+        print('var=',var,'grad=',grad)
+        gvs_clipped.append((grad_clipped,var))
+        op_metrics['gps_loss_grad/pre_mu_grad_max']=tf.reduce_max(tf.abs(grad))
+        op_metrics['gps_loss_grad/pre_mu_grad_min']=tf.reduce_min(tf.abs(grad))
+        op_metrics['gps_loss_grad/pre_mu_grad_mean']=tf.reduce_mean(tf.abs(grad))
+        op_metrics['gps_loss_grad/pre_mu_grad_clipped_max']=tf.reduce_max(tf.abs(grad_clipped))
+        op_metrics['gps_loss_grad/pre_mu_grad_clipped_min']=tf.reduce_min(tf.abs(grad_clipped))
+        op_metrics['gps_loss_grad/pre_mu_grad_clipped_mean']=tf.reduce_mean(tf.abs(grad_clipped))
+train_op_alllayers = optimizer.apply_gradients(gvs_clipped,global_step=global_step)
 
 # create train_op for last layers
 trainable_vars=[]
 print('  last_layer variables:')
 for v in tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES):
-    if 'gps_loss' in v.name or 'loss_country' in v.name:
+    if 'gps_loss' in v.name or 'loss_country' in v.name or 'loss_s2' in v.name:
         print('    ++ ',v.name)
         trainable_vars.append(v)
 train_op_lastlayers = optimizer.minimize(
     loss_regularized,
     global_step=global_step,
     var_list=trainable_vars,
-    #colocate_gradients_with_ops=True
     )
+
+# create train_op for expectation maximization
+#print('  EM variables:')
+#trainable_vars_e=[]
+#trainable_vars_m=[]
+#for v in tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES):
+    #if 'mu' in v.name or 'kappa' in v.name:
+        #print('    e: ',v.name)
+        #trainable_vars_e.append(v)
+    #else:
+        #print('    m: ',v.name)
+        #trainable_vars_m.append(v)
+#train_op_e = optimizer.minimize(
+    #loss_regularized,
+    #global_step=global_step,
+    #var_list=trainable_vars_e,
+    #)
+#train_op_m = optimizer.minimize(
+    #loss_regularized,
+    #global_step=global_step,
+    #var_list=trainable_vars_e,
+    #)
 
 ########################################
 print('creating session')
@@ -214,8 +300,9 @@ reset_local_vars=tf.local_variables_initializer()
 sess.run([reset_global_vars,reset_local_vars])
 
 if args.pretrain:
-    print('  loading pretrained weights')
-    sess.run(net.pretrained())
+    if not net is None:
+        print('  loading pretrained weights')
+        sess.run(net.pretrained())
 
 if args.initial_weights:
     # see https://stackoverflow.com/questions/41621071/restore-subset-of-variables-in-tensorflow
@@ -235,11 +322,14 @@ if args.initial_weights:
                 k0=ksplits[0]+suffix
                 k2='/'.join([k0]+ksplits[1:])
                 var=tf.get_default_graph().get_tensor_by_name(k2+":0")
-                if var.get_shape() == var_to_shape_map[k]:
+                if var.get_shape() != var_to_shape_map[k]:
+                    print('  >> not restoring',k,'; old=',var_to_shape_map[k],'; new=',var.get_shape())
+                elif '_constant' in k:
+                    print('  >> not restoring',k)
+
+                else:
                     var_dict[k]=var
                     print('  restoring',k)
-                else:
-                    print('  not restoring',k,'; old=',var_to_shape_map[k],'; new=',var.get_shape())
             except Exception as e:
                 print('  variable not found in graph: ',k)
                 #print('    e=',e)
@@ -278,18 +368,12 @@ while True:
             except:
                 writer=tf.python_io.TFRecordWriter(args.features_file)
 
-            gps,country,features=sess.run([gps_,country_,net])
-
-            #print('gps=',gps.shape)
-            #print('gps_=',gps_)
-            #print('country=',country.shape)
-            #print('country_=',country_)
-            #print('features=',features.shape)
-            #print('net=',net)
+            file,gps,country,features=sess.run([file_,gps_,country_,features_])
             for i in range(0,args.batchsize):
                 feature = {
+                    'filename': tf.train.Feature(bytes_list=tf.train.BytesList(value=file[i])),
                     'train/gps': tf.train.Feature(float_list=tf.train.FloatList(value=gps[i,:])),
-                    'train/country': tf.train.Feature(float_list=tf.train.FloatList(value=[country[i]])),
+                    'train/country': tf.train.Feature(int64_list=tf.train.Int64List(value=[country[i]])),
                     'train/features': tf.train.Feature(float_list=tf.train.FloatList(value=features[i,:])),
                 }
                 example = tf.train.Example(features=tf.train.Features(feature=feature))
@@ -297,7 +381,14 @@ while True:
             continue
 
         # select training op
-        if res_step<=args.train_only_last_until_step:
+        if args.train_em:
+            if (res_step/1000)%2==0:
+                train_op=train_op_m
+                train_op_msg='m'
+            else:
+                train_op=train_op_e
+                train_op_msg='e'
+        elif res_step<=args.train_only_last_until_step:
             train_op=train_op_lastlayers
             train_op_msg='last layers'
         else:
@@ -309,6 +400,7 @@ while True:
             loss_regularized,
             [ train_op,
               op_summaries,
+              tf.get_collection(tf.GraphKeys.UPDATE_OPS),
               tf.get_collection('gps_loss_updates'),
               #[tf.get_collection('gps_loss_splitter')],
               [tf.get_collection('gps_loss_splitter')] if local_step%100==0 and local_step>=1000 and args.gmm_splitter else [],

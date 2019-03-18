@@ -17,6 +17,9 @@ parser.add_argument('--initial_weights',type=str,required=True)
 parser.add_argument('--outputdir',type=str,default='log/img')
 parser.add_argument('--images',type=str,default='data/im2gps')
 parser.add_argument('--xaxis',type=str,default='local_step*args.batchsize')
+parser.add_argument('--batchsize',type=int,default=400)
+parser.add_argument('--num_crops',type=int,choices=[1,10],default=1)
+parser.add_argument('--input_format',type=str,choices=['jpg','tfrecord'],default='jpg')
 
 parser.add_argument('--lores_gmm_prekappa0',type=float,default=10.0)
 parser.add_argument('--hires_gmm_prekappa0',type=float,default=12.0)
@@ -32,11 +35,12 @@ with open(args.initial_weights+'/args.json','r') as f:
 
 args=argparse.Namespace(**json.loads(args_str))
 args=parser.parse_args(namespace=args)
+args.gmm_log2=True
 
 print('args=',args)
 
 args.gmm_minimizedist=False
-args.batchsize=400
+args.gmm_gradient_method=False
 
 ########################################
 print('loading libraries')
@@ -51,18 +55,38 @@ import datetime
 print('creating model pipeline')
 
 import model
-files=[args.images+'/*.jpg']
-iter=model.mkDataset(args,files,is_training=False)
-file_,(gps_,country_),image_=iter.get_next()
-image_=tf.reshape(image_,[-1,model.image_size,model.image_size,3])
-print('image_=',image_)
-net,loss,loss_regularized,op_metrics=model.mkModel(
+if args.input_format=='jpg':
+    files=[args.images+'/*.jpg']
+    iter=model.mkDataset_jpg(args,files,is_training=False)
+    file_,(gps_,country_),image_=iter.get_next()
+    image_=tf.reshape(image_,[-1,10,args.image_size,args.image_size,3])
+    if args.num_crops==1:
+        image_=image_[:,4,:,:,:]
+        image_=tf.reshape(image_,[-1,1,args.image_size,args.image_size,3])
+    print('image_=',image_)
+    features_=None
+    s2_=None
+
+elif args.input_format=='tfrecord':
+    #files=['/rhome/mizbicki/bigdata/geolocating/data/im2gps_tfrecord/out_tfrecord_1_0']
+    #files=['/rhome/mizbicki/bigdata/geolocating/data/im2gps_tfrecord/out_tfrecord_1_0']
+    files=['/rhome/mizbicki/bigdata/geolocating/data/image_tfrecord/out_tfrecord_32_'+str(i) for i in [0]]
+    #files=['/rhome/mizbicki/bigdata/geolocating/data/image_tfrecord_test/out_tfrecord_8_'+str(i) for i in range(0,8)]
+    iter=model.mkDataset_tfrecord_infer(args,files,is_training=False)
+    #iter=model.mkDataset_tfrecord_features(args,files,is_training=True)
+    gps_,country_,features_,s2_=iter.get_next()
+    image_=None
+
+net,features,loss,loss_regularized,op_metrics,op_endpoints=model.mkModel(
     args,
     image_,
     country_,
     gps_,
     is_training=False,
-    gmm_log2=True
+    #is_training=True,
+    gmm_log2=True,
+    features=features_,
+    s2_=s2_
     )
 
 #tf.summary.image('input_image',image_)
@@ -117,23 +141,28 @@ if args.initial_weights:
     def restore(suffix):
         var_dict={}
         for k in sorted(var_to_shape_map):
-            ksplits=k.split('/')
-            if ksplits[0][-2] == '_':
-                continue
-            try:
-                k0=ksplits[0]+suffix
-                k2='/'.join([k0]+ksplits[1:])
-                var=tf.get_default_graph().get_tensor_by_name(k2+":0")
-                if var.get_shape() == var_to_shape_map[k]:
-                    var_dict[k]=var
-                    #print('  restoring',k)
-                else:
-                    pass
-                    #print('  not restoring',k,'; old=',var_to_shape_map[k],'; new=',var.get_shape())
-            except Exception as e:
-                pass
-                #print('  variable not found in graph: ',k)
-                #print('    e=',e)
+            for j in range(0,args.num_crops):
+                #knew=k
+                knew=k.replace('wideresnet50','wideresnet50_'+str(j))
+                ksplits=knew.split('/')
+
+                #if ksplits[0][-2] == '_':
+                    #continue
+                try:
+                    k0=ksplits[0]+suffix
+                    k2='/'.join([k0]+ksplits[1:])
+                    var=tf.get_default_graph().get_tensor_by_name(k2+":0")
+                    if var.get_shape() == var_to_shape_map[k]:
+                        var_dict[k]=var
+                        print('  restoring',knew)
+                    else:
+                        print('  not restoring',k,'; old=',var_to_shape_map[k],'; new=',var.get_shape())
+                except Exception as e:
+                    if 'Adam' in k or 'beta1_power' in k or 'beta2_power' in k:
+                        pass
+                    else:
+                        print('  variable not found in graph: ',k)
+                        print('    e=',e)
         loader = tf.train.Saver(var_dict)
         loader.restore(sess, chkpt_file)
 
@@ -146,18 +175,31 @@ sess.run(reset_local_vars)
 sess.graph.finalize()
 sess.run(iter.initializer)
 
+f_dist=open(args.outputdir+'/dist','w')
+
 local_step=0
 while True:
     try:
 
         local_step+=1
-        res_loss,_=sess.run([loss_regularized,[mean_updates]])
+        res_loss,endpoints,gps,_=sess.run([loss_regularized,op_endpoints,gps_,[mean_updates]])
 
         print('%s  step=%d  loss=%g' %
             ( datetime.datetime.now()
             , local_step
             , res_loss
             ))
+
+        for i in range(0,endpoints['dist'].shape[0]):
+            #f_dist.write('%f\n'%(op_endpoints['dist'][i]))
+            dist=endpoints['dist'][i]
+            lat=endpoints['gps'][i][0]
+            lon=endpoints['gps'][i][1]
+            lat_=gps[i][0]
+            lon_=gps[i][1]
+            f_dist.write('%f (%f,%f) (%f,%f)\n'%(dist,lat,lon,lat_,lon_))
+
+        #print('endpoints.keys()=',endpoints.keys())
 
     except tf.errors.OutOfRangeError:
         summary_str=sess.run(summary)
@@ -166,6 +208,6 @@ while True:
         print('done!')
         break
 
-    except Exception as e:
-        sys.stderr.write('Exception: '+str(e)+'\n')
+    #except Exception as e:
+        #sys.stderr.write('Exception: '+str(e)+'\n')
 

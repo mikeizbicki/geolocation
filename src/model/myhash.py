@@ -224,6 +224,12 @@ def country_code2name(code):
         return 'Sudan'
     elif code=='US':
         return 'United States'
+    elif code=='BR':
+        return 'Brazil'
+    elif code=='PT':
+        return 'Portugal'
+    elif code=='UY':
+        return 'Uruguay'
     return code
 
 ################################################################################

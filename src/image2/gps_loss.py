@@ -1,3 +1,5 @@
+from __future__ import print_function
+
 epsilon=1e-9
 
 def gps_loss_layered(
@@ -131,10 +133,15 @@ def gps_loss(
     gmm_log2=False,
     gmm_pred_multiplier=1e-2,
     variable_scope='gps_loss',
+    s2warmstart_mu=False,
+    s2warmstart_kappa=False,
+    s2warmstart_kappa_s=0.5,
+    gradient_method='all',
     ):
     import tensorflow as tf
     import math
 
+    print('input=',input)
     pos_final_layer = tf.contrib.layers.flatten(input)
     pos_final_layer_size=int(pos_final_layer.get_shape()[1])
 
@@ -163,7 +170,7 @@ def gps_loss(
             op_lat_ = gps_[:,0]
             op_lon_ = gps_[:,1]
             op_lat_rad_ = op_lat_/360*2*math.pi
-            op_lon_rad_ = op_lon_/360*math.pi
+            op_lon_rad_ = op_lon_/360*2*math.pi
 
         # treat gps coords as R^2
         if 'naive' == pos_type:
@@ -187,7 +194,7 @@ def gps_loss(
                 b = mk_variable(tf.zeros([2]),name='b')
             response = tf.matmul(pos_final_layer,w) + b
             op_lat = tf.atan(response[:,0])*360/2/math.pi
-            op_lon = tf.atan(response[:,1])*360/math.pi
+            op_lon = tf.atan(response[:,1])*360/2/math.pi
             gps = tf.stack([op_lat,op_lon],1)
             op_endpoints['gps']=gps
 
@@ -195,13 +202,26 @@ def gps_loss(
         # see "directional statistics" by Mardia and Jupp for Fisher distribution
         if 'aglm_mix' == pos_type:
           #with tf.device('CPU:0'):
-            safeish_exp = lambda x: tf.exp(tf.minimum(x,30+tf.log(x+epsilon)),name='safeish_exp')
+            safeish_exp = lambda x: tf.exp(tf.minimum(x,30+tf.log(tf.maximum(x,0)+epsilon)),name='safeish_exp')
 
+            if s2warmstart_mu:
+                print('s2warmstart_mu')
+                locs=get_initial_mu_kappa(
+                    gmm_components,
+                    s2file='s2/class_cells-'+str(gmm_components),
+                    use_cities=False,
+                    prekappa0=None if s2warmstart_kappa else gmm_prekappa0,
+                    integral_s=s2warmstart_kappa_s,
+                    )
+            else:
+                locs=get_initial_mu_kappa(gmm_components,prekappa0=gmm_prekappa0)
+
+            gmm_components=len(locs)
             if pos_warmstart:
-                gps_coords_rad = [ [ city['lat']/360*2*math.pi,
-                                     city['lon']/360*math.pi
+                gps_coords_rad = [ [ loc['lat']/360*2*math.pi,
+                                     loc['lon']/360*2*math.pi
                                    ]
-                                   for city in get_cities(gmm_components)
+                                   for loc in locs
                                  ]
                 pre_mu_gps_rad0 = tf.get_variable(
                     name='pre_mu_gps_rad0',
@@ -209,13 +229,13 @@ def gps_loss(
                     trainable=False
                     )
                 pre_mu_tan = tf.tan(pre_mu_gps_rad0)
-            else:
-                pre_mu_gps0 = 0.1
-            pre_kappa_constant = tf.get_variable(
-                name='pre_kappa_constant',
-                initializer=tf.constant(gmm_prekappa0,shape=[gmm_components]),
-                trainable=False
-                )
+
+                pre_kappa_constant = tf.get_variable(
+                    name='pre_kappa_constant',
+                    initializer=tf.constant([loc['prekappa0'] for loc in locs],shape=[gmm_components]),
+                    #initializer=tf.constant(gmm_prekappa0,shape=[gmm_components]),
+                    trainable=False
+                    )
 
             if gmm_type=='simple':
                 pre_mu_var = tf.get_variable(
@@ -233,8 +253,8 @@ def gps_loss(
                     )
                 #pre_kappa_var=0.0
                 pre_kappa = pre_kappa_constant+pre_kappa_var
-                pre_kappa = pre_kappa_constant+pre_kappa_var
-                kappa = safeish_exp(pre_kappa)
+                #kappa = safeish_exp(pre_kappa)
+                kappa = tf.exp(pre_kappa)
 
                 op_regularizers['pre_mu_var']=tf.nn.l2_loss(pre_mu_var)
                 op_regularizers['pre_kappa_var']=tf.nn.l2_loss(pre_kappa_var)
@@ -266,7 +286,7 @@ def gps_loss(
                           , tf.cos(pre_mu[:,:,0]) * tf.cos(pre_mu[:,:,1]*2)
                           ])
             pre_mu_lat = pre_mu[:,:,0]*360/2/math.pi
-            pre_mu_lon = pre_mu[:,:,1]*360/math.pi
+            pre_mu_lon = pre_mu[:,:,1]*360/2/math.pi
             pre_mu_gps = tf.stack([pre_mu_lat,pre_mu_lon],axis=1)
 
             x = tf.stack([ tf.sin(op_lat_rad_)
@@ -365,6 +385,13 @@ def gps_loss(
                             mixture_logits = tf.matmul(net1,w2_sparse)+b2_sparse
 
             mixture = tf.nn.softmax(mixture_logits + epsilon) + epsilon
+            op_endpoints['mixture']=mixture
+
+            try:
+                if args.force_even_mixture:
+                    mixture=tf.tf.ones(mixture.get_shape())
+            except:
+                pass
 
             #safe_logsinh = lambda x: tf.where(
                     #tf.greater(x,1.0),
@@ -374,6 +401,18 @@ def gps_loss(
             #log_likelihood_per_component = pre_kappa - safe_logsinh(kappa) + (kappa * tf.reduce_sum(x_reshape*mu,axis=0))
 
             if gmm_distribution=='fvm':
+                log_likelihood_per_component = (
+                    tf.log(1e-9+2*kappa)
+                    +tf.log(1e-9+1-tf.exp(-2*kappa))
+                    +kappa*tf.reduce_sum(x_reshape*mu,axis=0)
+                    )
+            elif gmm_distribution=='fvm2':
+                log_likelihood_per_component = tf.where(
+                    tf.greater(kappa,4.0),
+                    -kappa+2,
+                    -kappa*kappa/8
+                    )+(kappa * tf.reduce_sum(x_reshape*mu,axis=0))
+            elif gmm_distribution=='fvm2_orig':
                 log_likelihood_per_component = tf.where(
                     tf.greater(kappa,1.0),
                     -kappa,
@@ -392,8 +431,153 @@ def gps_loss(
                 #safeish_exp2 = lambda x: tf.exp(tf.minimum(x,2+tf.log(x+epsilon)),name='safeish_exp')
                 #log_likelihood_per_component = tf.exp(-pre_kappa*(x_reshape-mu))**pow
 
-            likelihood_mixed = tf.reduce_sum(safeish_exp(log_likelihood_per_component)*mixture,axis=1)
-            loss_logloss = tf.reduce_mean(-tf.log(likelihood_mixed + epsilon),name='log_loss')
+            if False:
+                # FIXME: this section tries to find the componennt with the highest llh
+                # rather than the component with the largest mixture weight;
+                # It seems correct, but doesn't improve performance
+                with tf.variable_scope('llh_at_mu'):
+                    numk=1000
+                    vals,indices=tf.nn.top_k(mixture,k=numk)
+                    print('x_reshape=',x_reshape.get_shape())
+                    print('mu=',mu.get_shape())
+                    mu_tiled=tf.tile(mu,[1,numk,1])
+                    print('mu_tiled=',mu_tiled.get_shape())
+                    llh_at_mu_per_component = tf.where(
+                        tf.greater(kappa,4.0),
+                        -kappa+2,
+                        -kappa*kappa/8
+                        )+(kappa * tf.reduce_sum(mu_tiled*mu,axis=0))
+                    llh_at_mu_per_component_tiled=tf.tile(
+                        tf.reshape(llh_at_mu_per_component,[1,numk,mixture.get_shape()[1]]),
+                        #[mixture.get_shape()[0],1,1]
+                        [tf.shape(mixture)[0],1,1]
+                        )
+                    mixture_tiled=tf.tile(
+                        tf.reshape(mixture,[-1,1,mixture.get_shape()[1]]),
+                        #[mixture.get_shape()[0],numk,1],
+                        #[tf.shape(mixture)[0],numk,1]
+                        [1,numk,1]
+                        )
+                    #llh_at_mu_mixed = tf.reduce_sum(safeish_exp(llh_at_mu_per_component)*mixture,axis=1)
+                    print('llh_at_mu_per_component_tiled=',llh_at_mu_per_component_tiled.get_shape())
+                    print('mixture=',mixture.get_shape())
+                    print('mixture_tiled=',mixture_tiled.get_shape())
+                    llh_at_mu_mixed = tf.reduce_sum(safeish_exp(llh_at_mu_per_component_tiled)*mixture_tiled,axis=2)
+                    print('llh_at_mu_mixed=',llh_at_mu_mixed.get_shape())
+                    llh_at_mu=tf.log(llh_at_mu_mixed + epsilon)
+                    #llh_at_mu=tf.Print(llh_at_mu,[3.0])
+                    print('llh_at_mu=',llh_at_mu.get_shape())
+
+                    _,top_index=tf.nn.top_k(llh_at_mu,k=1)
+                    print('indices=',indices)
+                    print('top_index=',top_index[:,0])
+                    #top_index_1hot=tf.cast(tf.one_hot(top_index[:,0],numk),tf.float32)
+                    top_index_1hot=tf.one_hot(top_index[:,0],numk)
+                    print('top_index_1hot=',top_index_1hot)
+                    best_indices=tf.reduce_sum(tf.cast(top_index_1hot,tf.int32)*indices,axis=1)
+                    #best_indices=tf.gather(indices,top_index_1hot,axis=1)
+                    print('best_indices=',best_indices)
+                    main_component=tf.one_hot(best_indices,mixture.get_shape()[1])
+                    print('main_componenet=',main_component)
+
+                    #r_max=tf.reduce_max(llh_at_mu, axis=1, keep_dims=True)
+                    #main_component=tf.where(
+                            #tf.equal(r_max, llh_at_mu),
+                            #0.0*mixture+1.0,
+                            #0.0*mixture
+                            #)
+                    main_component_reshape=tf.reshape(main_component,[-1,1,sparsity])
+                    #asd
+
+            r_max=tf.reduce_max(mixture, axis=1, keep_dims=True)
+            main_component=tf.where(
+                    tf.equal(r_max, mixture),
+                    0.0*mixture+1.0,
+                    0.0*mixture
+                    )
+            main_component_reshape=tf.reshape(main_component,[-1,1,sparsity])
+
+            gps = tf.reduce_sum(main_component_reshape*pre_mu_gps,axis=2)
+            op_lat = gps[:,0]
+            op_lon = gps[:,1]
+
+            #with tf.variable_scope('gps_topk'):
+                #def batch_gather(params, indices, name=None):
+                    #shape=tf.shape(params)
+                    #print('shape=',shape)
+                    #params2=tf.reshape(params,[shape[0]*shape[1],shape[2]])
+                    #shape_indices=tf.shape(indices)
+                    #indices2=tf.reshape(indices,[shape_indices[0]*shape_indices[1]])
+                    #return tf.reshape(tf.gather(params2,indices2),[shape[0],shape_indices[1],shape[2]])
+
+                #numk=10
+                #vals,indices=tf.nn.top_k(mixture,k=numk)
+                #indices=tf.Print(indices,[indices,vals],'indices,vals')
+                #vals=tf.Print(vals,[vals],'vals')
+                #tf.transpose(pre_mu_gps[2,1,0])
+                #tf.reshape(indices,
+                #gps_topk=batch_gather(pre_mu_gps,indices)
+                ##gps_topk=batch_gather(gps,indices)
+                #op_endpoints['gps_topk']=gps_topk
+                #op_endpoints['gps_topk_vals']=vals
+                #op_endpoints['gps_topk_indices']=indices
+                #print('gps_topk=',gps_topk)
+                #print('indices=',indices)
+                #print('pre_mu_gps=',pre_mu_gps)
+                #min_val=tf.reduce_min(vals)
+                #component_topk=tf.where(
+                        #tf.equal(min_val, mixture),
+                        #0.0*mixture+1.0,
+                        #0.0*mixture
+                        #)
+                #print('component_topk=',component_topk)
+
+            #mixture=tf.Print(mixture,[mixture,main_component,r_max],'mixture')
+
+            if gradient_method=='stop':
+                likelihood_mixed_llh = tf.reduce_sum(safeish_exp(log_likelihood_per_component)*tf.stop_gradient(mixture),axis=1)
+                loss_logloss_llh = tf.reduce_mean(-tf.log(likelihood_mixed_llh + epsilon),name='log_loss_a')
+
+                likelihood_mixed_mixture = tf.reduce_sum(safeish_exp(tf.stop_gradient(log_likelihood_per_component))*mixture,axis=1)
+                loss_logloss_mixture = tf.reduce_mean(-tf.log(likelihood_mixed_mixture + epsilon),name='log_loss_b')
+
+                loss_logloss = (loss_logloss_llh+loss_logloss_mixture)/2
+                op_metrics['gps_loss/log_loss_llh']=loss_logloss_llh
+                op_metrics['gps_loss/log_loss_mixture']=loss_logloss_mixture
+                op_metrics['gps_loss/log_loss']=loss_logloss
+
+            elif gradient_method=='main':
+                likelihood_mixed_main = tf.reduce_sum(safeish_exp(main_component*log_likelihood_per_component)*tf.stop_gradient(mixture),axis=1)
+                loss_logloss_main = tf.reduce_mean(-tf.log(likelihood_mixed_main + epsilon),name='log_loss_a')
+
+                likelihood_mixed_mixture = tf.reduce_sum(safeish_exp(tf.stop_gradient(log_likelihood_per_component))*mixture,axis=1)
+                loss_logloss_mixture = tf.reduce_mean(-tf.log(likelihood_mixed_mixture + epsilon),name='log_loss_b')
+
+                loss_logloss = (loss_logloss_main+loss_logloss_mixture)/2
+                op_metrics['gps_loss/log_loss_main']=loss_logloss_main
+                op_metrics['gps_loss/log_loss_mixture']=loss_logloss_mixture
+                op_metrics['gps_loss/log_loss']=loss_logloss
+
+            elif gradient_method=='efam':
+                loss_logloss_each = -tf.reduce_sum(log_likelihood_per_component*mixture,axis=1)
+                loss_logloss = tf.reduce_mean(loss_logloss_each,name='log_loss')
+                op_endpoints['gps_loss/log_loss']=loss_logloss_each
+                op_metrics['gps_loss/log_loss']=loss_logloss
+
+            else:
+                likelihood_mixed = tf.reduce_sum(safeish_exp(log_likelihood_per_component)*mixture,axis=1)
+                loss_logloss_each=-tf.log(likelihood_mixed + epsilon)
+                loss_logloss = tf.reduce_mean(loss_logloss_each,name='log_loss')
+                op_endpoints['gps_loss/log_loss']=loss_logloss_each
+                op_metrics['gps_loss/log_loss']=loss_logloss
+
+            #likelihood_mixed = tf.reduce_sum(safeish_exp(log_likelihood_per_component)*mixture,axis=1)
+            #loss_logloss = tf.reduce_mean(-tf.log(likelihood_mixed + epsilon),name='log_loss')
+
+            #print('mixture=',mixture)
+            #print('main_component=',main_component)
+            #print('mixture_main=',mixture*main_component)
+
             op_metrics['gps_loss/log_loss']=loss_logloss
 
             if gmm_xentropy:
@@ -403,7 +587,7 @@ def gps_loss(
                     op_lat = pre_mu_gps[:,0,:]
                     op_lon = pre_mu_gps[:,1,:]
                     op_lat_rad = op_lat/360*2*math.pi
-                    op_lon_rad = op_lon/360*math.pi
+                    op_lon_rad = op_lon/360*2*math.pi
 
                     op_lat_rad_tiled_=tf.tile(tf.reshape(op_lat_rad_,[-1,1]),[1,gmm_components])
                     op_lon_rad_tiled_=tf.tile(tf.reshape(op_lon_rad_,[-1,1]),[1,gmm_components])
@@ -525,6 +709,7 @@ def gps_loss(
                             op_metrics['gps_loss_debug/'+n+'/mean']=tf.reduce_mean(v)
 
                     summarize_vector(tf.abs(pre_kappa_var),'pre_kappa_var_abs')
+                    summarize_vector(      (pre_kappa_var),'pre_kappa_var')
                     summarize_vector(tf.abs(pre_mu_var),'pre_mu_var_abs')
                     summarize_vector(mixture_logits,'mixture_logits')
                     summarize_vector(mixture,'mixture')
@@ -542,23 +727,6 @@ def gps_loss(
                         topp=vals[:,int((1.0-p)*sparsity)-1]
                         op_metrics['gps_loss_debug/percentile_'+str(p)]=topp
 
-            main_component=tf.where(
-                    tf.equal(tf.reduce_max(mixture, axis=1, keep_dims=True), mixture),
-                    0.0*mixture+1.0,
-                    0.0*mixture
-                    )
-            main_component_reshape=tf.reshape(main_component,[-1,1,sparsity])
-
-            gps = tf.reduce_sum(main_component_reshape*pre_mu_gps,axis=2)
-            op_lat = gps[:,0]
-            op_lon = gps[:,1]
-            #op_gps_rad = tf.reduce_sum(main_component_reshape*pre_mu_gps,axis=1)
-            #op_gps_rad = tf.tensordot(main_component,pre_mu,axes=[1,0])
-            #op_lat = tf.atan(op_gps_rad[:,0])*360/2/math.pi
-            #op_lon = tf.atan(op_gps_rad[:,1])*360/math.pi
-            #gps = tf.stack([op_lat,op_lon])
-            #gps = tf.Print(gps,[gps,op_gps_rad,loss])
-
             op_outputs['aglm_mix/pre_mu_gps']=pre_mu_gps
             op_outputs['aglm_mix/mu']=mu
             op_outputs['aglm_mix/pre_kappa']=pre_kappa
@@ -567,19 +735,26 @@ def gps_loss(
             op_outputs['aglm_mix/log_loss']=loss_logloss
 
         op_outputs['gps']=gps
+        op_endpoints['gps']=gps
 
         # common outputs
 
         op_lat_rad = op_lat/360*2*math.pi
-        op_lon_rad = op_lon/360*math.pi
+        op_lon_rad = op_lon/360*2*math.pi
 
         hav = lambda x: tf.sin(x/2)**2
+        #hav = lambda x: (1-tf.cos(x))/2
         squared_angular_dist = ( hav(op_lat_rad-op_lat_rad_)
             +tf.cos(op_lat_rad)*tf.cos(op_lat_rad_)*hav(op_lon_rad-op_lon_rad_)
             )
 
         # radius of earth = 3959 miles, 6371 kilometers
         op_dist = 2*6371*tf.asin(tf.sqrt(tf.maximum(0.0,squared_angular_dist)))
+        #op_dist = 2*6371*tf.asin(tf.sqrt(tf.maximum(0.0,squared_angular_dist)))
+        #op_dist = 6371*tf.asin(tf.sqrt(tf.maximum(0.0,squared_angular_dist)))
+        ##op_dist = 6371*tf.asin(tf.sqrt(tf.maximum(0.0,squared_angular_dist)))
+        #op_dist = 6371*tf.sqrt(tf.maximum(0.0,squared_angular_dist))
+        op_endpoints['dist']=op_dist
         op_dist_ave = tf.reduce_mean(op_dist)
         op_metrics['gps_loss/dist']=op_dist_ave
 
@@ -658,6 +833,100 @@ def mk_variable(
             )
 
 ################################################################################
+
+def get_initial_mu_kappa(numlocs,s2file=None,use_cities=True,prekappa0=None,integral_s=0.5):
+    if use_cities:
+        ret=[]
+        for loc in get_cities(numlocs):
+            loc['prekappa0']=prekappa0
+            ret.append(loc)
+        return ret
+
+    else:
+
+        # precompute prekappa0 for each level
+        radius_of_earth_km=6371.0
+        level_edge_len_km = {
+            0 : 7842.0,
+            1 : 5004.0,
+            2 : 2489.0,
+            3 : 1167.0,
+            4 : 609.0,
+            5 : 298.0,
+            6 : 151.0,
+            7 : 76.0,
+            8 : 38.0,
+            9 : 19.0,
+            10 : 9.0,
+            11 : 5.0,
+            12 : 2.0,
+            13 : 1185.0/1000.0,
+            14 : 593.0/1000.0,
+            15 : 296.0/1000.0,
+            16 : 148.0/1000.0,
+            17 : 74.0/1000.0,
+            18 : 37.0/1000.0,
+            19 : 19.0/1000.0,
+            20 : 9.0/1000.0,
+            21 : 5.0/1000.0,
+            22 : 2.0/1000.0,
+            23 : 116/1000.0/100.0,
+            24 : 58/1000.0/100.0,
+            25 : 29/1000.0/100.0,
+            26 : 14/1000.0/100.0,
+            27 : 7/1000.0/100.0,
+            28 : 4/1000.0/100.0,
+            29 : 18/1000.0/1000.0,
+            30 : 9/1000.0/1000.0,
+        }
+        from scipy.optimize import fsolve
+        import math
+        import mpmath
+        level_prekappa0={}
+        for level in level_edge_len_km:
+            t = level_edge_len_km[level]/radius_of_earth_km
+            s = integral_s
+            #f = lambda k: 2*math.pi*(math.exp(k)-math.exp(k*math.cos(t)))/k-s
+            #def f(k):
+                #expk=math.exp(k)
+                #(expk-math.exp(k*math.cos(t)))*2*math.exp(2*k)
+            #f = lambda k: 1.0/(math.exp(k)-math.exp(-k))*(math.exp(k)-math.exp(k*math.cos(t)))-s
+            f = lambda k: (1-math.exp(k*math.cos(t)-k))/(1-math.exp(-2*k))-s
+            init=1.0
+            if level>0:
+                init=math.exp(level_prekappa0[level-1])*4
+            #if level>18:
+                #kappa=init
+            #else:
+            try:
+                kappa=fsolve(f,init,maxfev=10000,xtol=1e-50)
+                warning='pass'
+            except:
+                kappa=init
+                warning='fail'
+            min_kappa=1e-9
+            if kappa < min_kappa:
+                kappa=min_kappa
+            level_prekappa0[level]=math.log(kappa)
+            print('  ',warning,'level=',level,'init=',init,'kappa=',kappa,'prekappa0=',level_prekappa0[level])
+
+        # load s2 cells
+        import s2sphere
+        import pickle
+        with open(s2file,'rb') as f:
+            s2cells=pickle.load(f)
+
+        ret=[]
+        for cell in s2cells:
+            latlng = cell.to_lat_lng()
+            entry = {
+                'lat' : latlng.lat().degrees,
+                'lon' : latlng.lng().degrees,
+                'prekappa0' : level_prekappa0[cell.level()] if prekappa0 is None else prekappa0,
+                #'prekappa0' : float(cell.level()) if prekappa0 is None else prekappa0,
+            }
+            ret.append(entry)
+        return ret
 
 city_locs=[
     {'lat':35.68501691, 'lon':139.7514074},
@@ -7998,3 +8267,4 @@ def get_cities(n,seed=0):
                     for city in city_locs
                     ]
     return city_locs_ret[:n]+get_cities(n-len(city_locs),seed=seed+1)
+
