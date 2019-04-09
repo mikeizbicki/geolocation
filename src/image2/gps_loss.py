@@ -288,6 +288,7 @@ def gps_loss(
             pre_mu_lat = pre_mu[:,:,0]*360/2/math.pi
             pre_mu_lon = pre_mu[:,:,1]*360/2/math.pi
             pre_mu_gps = tf.stack([pre_mu_lat,pre_mu_lon],axis=1)
+            op_endpoints['pre_mu_gps']=pre_mu_gps
 
             x = tf.stack([ tf.sin(op_lat_rad_)
                          , tf.cos(op_lat_rad_) * tf.sin(op_lon_rad_*2)

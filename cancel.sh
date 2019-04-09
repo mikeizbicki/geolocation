@@ -1,4 +1,5 @@
 #!/bin/bash
+#set -e
 
 for run in $@; do
     echo $run

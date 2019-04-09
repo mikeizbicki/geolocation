@@ -16,6 +16,7 @@ parser=argparse.ArgumentParser('train a model')
 parser.add_argument('--initial_weights',type=str,required=True)
 parser.add_argument('--outputdir',type=str,default='log/img')
 parser.add_argument('--images',type=str,default='data/im2gps')
+parser.add_argument('--images_subdir',action='store_true')
 parser.add_argument('--xaxis',type=str,default='local_step*args.batchsize')
 parser.add_argument('--batchsize',type=int,default=400)
 parser.add_argument('--num_crops',type=int,choices=[1,10],default=1)
@@ -56,7 +57,10 @@ print('creating model pipeline')
 
 import model
 if args.input_format=='jpg':
-    files=[args.images+'/*.jpg']
+    if args.images_subdir:
+        files=[args.images+'/a*/*.jpg']
+    else:
+        files=[args.images+'/*.jpg']
     iter=model.mkDataset_jpg(args,files,is_training=False)
     file_,(gps_,country_),image_=iter.get_next()
     image_=tf.reshape(image_,[-1,10,args.image_size,args.image_size,3])

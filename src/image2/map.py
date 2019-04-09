@@ -18,11 +18,13 @@ parser.add_argument('--input_format',type=str,choices=['jpg','tfrecord'],default
 parser.add_argument('--img',type=str,default=None)
 parser.add_argument('--tweet',type=str,default=None)
 parser.add_argument('--s2file',type=str,default=None)
+parser.add_argument('--s2file_overwrite',action='store_true')
+parser.add_argument('--nogpsout',action='store_true')
 parser.add_argument('--initial_weights',type=str,default=None)
 parser.add_argument('--outputdir',type=str,default='img/maps')
 parser.add_argument('--outputname',type=str,default='')
 parser.add_argument('--marks',type=float,nargs='*',default=[])
-parser.add_argument('--ratio',choices=['wide2','wide','full'],default='full')
+parser.add_argument('--ratio',choices=['wide2','wide','full','square','tall'],default='full')
 parser.add_argument('--custom',choices=['gaussian','vmf'],default=None)
 parser.add_argument('--voronoi',action='store_true')
 parser.add_argument('--voronoi_random',action='store_true')
@@ -239,11 +241,15 @@ for lat,lon in zip(args.marks[0::2], args.marks[1::2]):
 px0,px1 = map.to_pixels((box[0],box[1]))
 px2,px3 = map.to_pixels((box[2],box[3]))
 if args.autoscale_y:
-    if args.ratio=='full':
+    if args.ratio=='square':
+        ratio=1.0
+    elif args.ratio=='full':
         ratio=3.0/4.0
     elif args.ratio=='wide':
         ratio=9.0/16.0
     elif args.ratio=='wide2':
+        ratio=4.0/3.0
+    elif args.ratio=='tall':
         ratio=4.0/3.0
     yrange=(px2-px0)*ratio
     yave=(px1+px3)/2.0
@@ -313,6 +319,7 @@ if args.s2file:
                 ((y>=px1 and y<=px3) or (y>=px3 and y<= px1))):
                 gps_coords.append([lat,lng])
         print('    len=',len(gps_coords))
+
 else:
     gps_coords=[]
 
@@ -410,7 +417,7 @@ if args.initial_weights:
 
 ########################################
 print('gps output')
-if 'gps' in args.outputs:
+if 'gps' in args.outputs and not args.nogpsout:
 
     ####################
     print('  eval loop')
@@ -711,15 +718,37 @@ if args.s2file:
         if not args.voronoi:
             ax.add_collection(patches)
         else:
+            endpoints=sess.run(op_endpoints)
+            gpscoords=endpoints['pre_mu_gps']
+            print('gpscoords=',gpscoords)
+            print('gpscoords.shape=',gpscoords.shape[2])
             xy_onscreen=[]
-            for cellid in s2cells_onscreen:
-                latlng=cellid.to_lat_lng()
-                lat=latlng.lat().degrees
-                lng=latlng.lng().degrees
+            for i in range(0,gpscoords.shape[2]):
+                lat=gpscoords[0][0][i]
+                lng=gpscoords[0][1][i]
                 x, y = map.to_pixels([lat,lng])
+                fudge=1000
+                #if (((x>=px0-fudge and x<=px2+fudge) or (x>=px2-fudge and x<= px0+fudge)) and
+                    #((y>=px1-fudge and y<=px3+fudge) or (y>=px3-fudge and y<= px1+fudge))):
                 xy_onscreen.append([x,y])
-                #ax.plot(x, y, 'og', ms=15);
-                #print('x,y=',(x,y))
+
+            xy_onscreen2=xy_onscreen
+            if True:
+                xy_onscreen=[]
+                for cellid in s2cells: #_onscreen:
+                    latlng=cellid.to_lat_lng()
+                    lat=latlng.lat().degrees
+                    lng=latlng.lng().degrees
+                    x, y = map.to_pixels([lat,lng])
+                    xy_onscreen.append([x,y])
+                    #ax.plot(x, y, 'og', ms=15);
+                    #print('x,y=',(x,y))
+                #print('xy_onscreen=',xy_onscreen)
+
+            for xy,xy2 in zip(sorted(xy_onscreen),sorted(xy_onscreen2)):
+                print('xy=',xy,'xy2=',xy2,'diff=',xy[0]-xy2[0],xy[1]-xy2[1])
+            xy_onscreen=xy_onscreen2
+
             r=50.0
             if args.voronoi_random:
                 xy_onscreen=[ [x+np.random.randn()*r,y+np.random.randn()*r] for [x,y] in xy_onscreen ]
@@ -758,9 +787,10 @@ if args.custom:
     steps_y=120
     nx,ny=np.meshgrid(np.linspace(px0,px2,(steps_x)),np.linspace(px3,px1,(steps_y)))
 
-    gps=args.force_center
-    #gps=[47.11,-101.3]
-    gpses_vmf=[[50,-100],[-0,-70],[46,6]]
+    gpses=[args.force_center]
+    #gpses=[[47.11,-101.3]]
+    #gpses=[[51.5074, 0.127]]
+    #gpses_vmf=[[50,-100],[-0,-70],[46,6]]
 
     #ax.plot(px0, px1, 'or', ms=50);
     #ax.plot(px0, px3, 'or', ms=50);
@@ -796,7 +826,8 @@ if args.custom:
                 sigma=200
                 nz_vmf[i][j]=math.exp(- ((mu[0]-x)**2 + (mu[1]-y)**2)/sigma**2)
             if args.custom=='gaussian':
-                sigma=0.34
+                gps_gaussian=gpses[0]
+                sigma=0.20
                 #mu=map.to_pixels(gps)
                 #gps2_lat = min(box[0],box[2])+i*abs(box[0]-box[2])/float(steps_x)
                 #gps2_lon = min(box[1],box[3])+j*abs(box[3]-box[1])/float(steps_y)
@@ -804,7 +835,7 @@ if args.custom:
                 nz_gaussian[i][j]=math.exp(- ((gps_gaussian[0]-gps2[0])**2 + (gps_gaussian[1]-gps2[1])**2)/sigma**2)
 
             elif args.custom=='vmf':
-                for gps_vmf in gpses_vmf:
+                for gps_vmf in gpses:
                     gps_rad=[math.radians(gps_vmf[0]),math.radians(gps_vmf[1])/2]
                     mu = [ math.sin(gps_rad[0])
                          , math.cos(gps_rad[0]) * math.sin(gps_rad[1]*2)
@@ -816,7 +847,7 @@ if args.custom:
                          , math.cos(gps2_rad[0]) * math.sin(gps2_rad[1]*2)
                          , math.cos(gps2_rad[0]) * math.cos(gps2_rad[1]*2)
                          ]
-                    kappa=4.0e1
+                    kappa=1
                     nz_vmf[i][j]+=math.exp(kappa*(p[0]*mu[0]+p[1]*mu[1]+p[2]*mu[2]))
                     nz_vmf[i][j]+=kappa/(4*math.pi*math.sinh(kappa))*math.exp(kappa*(p[0]*mu[0]+p[1]*mu[1]+p[2]*mu[2]))
 
@@ -826,35 +857,54 @@ if args.custom:
 
     totalweights=np.sum(nz_vmf)
     nz_vmf=np.log(nz_vmf/totalweights+1e-10)/math.log(10)
+    print('max=',np.amax(nz_vmf))
+    print('min=',np.amin(nz_vmf))
+
     levels=[-4,-3,-2,-1,0]
     levels_gaussian=[-4,-3,-2,-1,0]
 
     cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", ['#ffffff','#ff9999','#cc6666','#9966cc','#9900ff'])
-    norm = plt.Normalize(min(levels),max(levels))
+    #norm = plt.Normalize(min(levels),max(levels))
+
+    if args.custom=='vmf':
+        plotnz=nz_vmf
+        prelevels=[0.7,0.75,0.8,0.85,0.9,0.95,0.975,0.99,1.0]
+    else:
+        plotnz=nz_gaussian
+        prelevels=[0.01,0.1,0.25,0.5,0.65,0.8,0.9,0.95,1.0]
+    lo=np.amin(plotnz)
+    hi=np.amax(plotnz)
+    alpha=0.1
+    norm = plt.Normalize(alpha*lo+(1-alpha)*hi,hi)
+    levels = [(1-alpha)*lo+alpha*hi for alpha in prelevels]
 
     cs = ax.contourf(
         nx,
         ny,
-        np.transpose(nz_vmf),
-        #levels=levels,
-        #antialiased=True,
+        np.transpose(plotnz),
+        levels=levels,
+        antialiased=True,
         cmap=cmap,
         #norm=norm,
         alpha=0.5,
+        #linewidths=10,
         )
-    cs = ax.contourf(
-        nx,
-        ny,
-        np.transpose(nz_gaussian),
-        levels=levels_gaussian,
-        antialiased=True,
-        cmap=cmap,
-        norm=norm,
-        alpha=0.5,
-        )
+    #cs = ax.contourf(
+        #nx,
+        #ny,
+        #np.transpose(nz_gaussian),
+        ##levels=levels_gaussian,
+        #antialiased=True,
+        #cmap=cmap,
+        ##norm=norm,
+        #alpha=0.5,
+        ##linewidths=0,
+        #)
 
+    outfile=prefixname+'_'+args.custom+'.pdf'
+    print('saving to '+outfile)
     plt.savefig(
-        prefixname+'_'+args.custom+'.pdf',
+        outfile,
         bbox_inches = 'tight',
         pad_inches = 0
         )
