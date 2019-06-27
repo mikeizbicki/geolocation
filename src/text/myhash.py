@@ -187,7 +187,7 @@ country_codes_uniq=list(set(country_codes))
 
 def country2int(str):
     try:
-        return country_codes.index(str)
+        return country_codes.index(str.upper())
     except:
         print('unknown country code = [',str,']')
         return 0

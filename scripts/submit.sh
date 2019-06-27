@@ -26,7 +26,7 @@ if [ -z $SLURM_SUBMIT_DIR ]; then
     fi
     opts_slurm="--mem=50g --time=28-0:00:00"
     opts_log="--log_dir=$output --log_name=${vars}"
-    sbatch $opts_debug $opts_gpu $opts_slurm submit.sh $@ $opts_log
+    sbatch $opts_debug $opts_gpu $opts_slurm scripts/submit.sh $@ $opts_log
 
 else
     echo SLURM_JOB_ID=$SLURM_JOB_ID
@@ -37,7 +37,7 @@ else
     else
         . /rhome/mizbicki/tf-cpu-1.4/bin/activate
     fi
-    #./src/model/train.py $params
-    python -u ./src/image2/train.py $params
+    python -u ./src/model/train.py $params
+    #python -u ./src/image2/train.py $params
 fi
 

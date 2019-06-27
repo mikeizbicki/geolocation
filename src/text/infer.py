@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#s!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 from __future__ import print_function
@@ -16,11 +16,9 @@ parser=argparse.ArgumentParser('infer using a model')
 
 parser.add_argument('--modeldir',type=str,required=True)
 parser.add_argument('--outputdir',type=str,default='img/infer')
-#parser.add_argument('--tweets',type=str,default='data/infer/riverside')
 parser.add_argument('--tweets',type=str,default='data/infer/infer')
 #parser.add_argument('--tweets',type=str,default='data/twitter-early/geoTwitter17-10-21/geoTwitter17-10-21_01:05.gz')
 #parser.add_argument('--tweets',type=str,default='data/MX/train.gz')
-parser.add_argument('--maxtweets',type=int,default=100)
 parser.add_argument('--plot_res',choices=['hi','good','med','lo'],default='med')
 parser.add_argument('--plot_true',type=bool,default=True)
 parser.add_argument('--plot_mle',type=bool,default=False)
@@ -28,8 +26,10 @@ parser.add_argument('--plot_mu',type=bool,default=False)
 parser.add_argument('--plot_numbars',type=int,default=5)
 parser.add_argument('--overwrite',action='store_true')
 parser.add_argument('--notext',action='store_true')
+parser.add_argument('--noplots',action='store_true')
 parser.add_argument('--format',type=str,choices=['png','eps','pdf'],default='png')
 parser.add_argument('--marker',type=str,choices=['.','o'],default='o')
+parser.add_argument('--language',type=str,default=None)
 
 args = parser.parse_args()
 
@@ -84,10 +84,10 @@ import myhash
 
 def restore_session(batchsize):
     print('  restore_session(batchsize=',batchsize,')')
-    with tf.Graph().as_default() as graph_bs1:
+    with tf.Graph().as_default():
         ret=MyNamespace({})
         ret.args=copy.deepcopy(args_train)
-        ret.args.batchsize=batchsize
+        ret.args.batchsize=None #batchsize
         ret.input_tensors={
             'country_' : tf.placeholder(tf.int64, [ret.args.batchsize,1],name='country_'),
             'text_' : tf.placeholder(tf.float32, [ret.args.batchsize,model.tweetlen,ret.args.cnn_vocabsize],name='text_'),
@@ -98,8 +98,9 @@ def restore_session(batchsize):
             'newuser_' : tf.placeholder(tf.float32, [ret.args.batchsize,1],name='newuser_'),
             'hash_' : tf.sparse_placeholder(tf.float32,name='hash_'),
         }
+        ret.args.batchsize=batchsize
 
-        ret.op_metrics,ret.op_loss_regularized,ret.op_losses,ret.op_outputs = model.inference(ret.args,ret.input_tensors)
+        ret.op_metrics,ret.op_loss_regularized,ret.op_losses,ret.op_losses_unreduced,ret.op_outputs = model.inference(ret.args,ret.input_tensors,disable_summaries=True)
 
         config = tf.ConfigProto(allow_soft_placement = True)
         ret.sess = tf.Session(config=config)
@@ -110,6 +111,7 @@ def restore_session(batchsize):
         return ret
 
 bs1 = restore_session(1)
+bs280 = restore_session(None)
 
 ########################################
 print('preparing fonts')
@@ -154,11 +156,14 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.basemap import Basemap
 import numpy as np
 
-#try:
-    #file=gzip.open(args.tweets,'r')
-#except:
-file=open(args.tweets,'r')
-#file.readline()
+# load the tweets file
+try:
+    file=gzip.open(args.tweets,'r')
+    file.readline()
+    file.close()
+    file=gzip.open(args.tweets,'r')
+except:
+    file=open(args.tweets,'r')
 
 # generate outputdir directory if needed
 dataname=os.path.basename(os.path.normpath(args.tweets))
@@ -169,38 +174,76 @@ except:
     pass
 
 # main loop
-for tweetnum in range(0,args.maxtweets):
+import itertools
+for tweetnum in itertools.count():
 
-    print(datetime.datetime.now(),'tweet',tweetnum)
+    if tweetnum%100==0:
+        print(datetime.datetime.now(),'tweet',tweetnum)
     line=file.readline()
     basename=str(tweetnum)+'-'+args.plot_res
+
+    # quit on EOF
+    if line=='':
+        break
 
     # skip if already computed
     if not args.overwrite:
         mainfilepath=outputdir+'/'+basename+'.'+args.format
+        #print('mainfilepath=',mainfilepath)
         if os.path.exists(mainfilepath):
             continue
 
     # get tweet data
-    tweet=json.loads(line)
-    tweet['text']=model.preprocess_text(args_train,tweet['text'])
-    print('tweet=',tweet)
-    input=model.json2dict(args_train,line)
-    print('input=',input)
-    input['newuser_']=np.array([1])
-    print('  input[gps_]=',input['gps_'])
-    lat_=input['gps_'][0]
-    lon_=input['gps_'][1]
+    try:
+        tweet=json.loads(line)
+        tweet['text']=model.preprocess_text(args_train,tweet['text'])
+        input=model.json2dict(args_train,line)
+        input['newuser_']=np.array([1])
+        lat_=input['gps_'][0]
+        lon_=input['gps_'][1]
+
+        if args.language is not None:
+            if not args.language==tweet['lang']:
+                continue
+
+        # FIXME:
+        #line_data=json.loads(line)
+        #tweet=line_data['tweet']
+        #tweet['text']=model.preprocess_text(args_train,tweet['text'])
+        #line2=json.dumps(tweet)
+        #input=model.json2dict(args_train,line2)
+        #input['newuser_']=np.array([1])
+        #lat_=input['gps_'][0]
+        #lon_=input['gps_'][1]
+        #all_losses_mangled=line_data['all_losses_mangled']
+        #losses=line_data['losses']
+        #loss=line_data['loss']
+    except Exception as e:
+        #import traceback
+        #traceback.print_exc()
+        #asd
+        continue
 
     # get model data
     feed_dict=model.mk_feed_dict(bs1.args,[input])
-    loss,losses,output=bs1.sess.run(
-        [bs1.op_loss_regularized, bs1.op_losses, bs1.op_outputs],
-        feed_dict=feed_dict
-        )
-    print('  output[gps]=',np.reshape(output['gps'],[2]))
-    print('  loss=',loss)
-    print('  losses=',losses)
+    try:
+        losses
+        output,=bs1.sess.run(
+            [bs1.op_outputs],
+            feed_dict=feed_dict
+            )
+    except:
+        loss,losses,output=bs1.sess.run(
+            [bs1.op_loss_regularized, bs1.op_losses, bs1.op_outputs],
+            feed_dict=feed_dict
+            )
+
+    if not args.noplots:
+        print(('  tweet[text]='+tweet['text']).encode('utf-8').strip())
+        print('  input[gps_]=',input['gps_'])
+        print('  output[gps]=',np.reshape(output['gps'],[2]))
+        print('  loss=',loss)
+        print('  losses=',losses)
 
     def gps2sphere(lat,lon):
         lat_rad=lat/360*2*math.pi
@@ -212,9 +255,7 @@ for tweetnum in range(0,args.maxtweets):
         return x
 
     pre_mu_gps=np.reshape(output['aglm_mix/pre_mu_gps'],[2,args_train.gmm_components])
-    #print('pre_mu_gps=',pre_mu_gps[:,:10])
     mu=np.reshape(output['aglm_mix/mu'],[3,args_train.gmm_components])
-    #mu=gps2sphere(pre_mu_gps[0,:],pre_mu_gps[1,:])
 
     pre_kappa=output['aglm_mix/pre_kappa']
     kappa=output['aglm_mix/kappa']
@@ -222,51 +263,70 @@ for tweetnum in range(0,args.maxtweets):
     kappa=math.exp(pre_kappa)
 
     mixture=output['aglm_mix/mixture']
-    #print('mixture=',mixture)
-    #mixture=np.ones(mixture.shape)/args_train.gmm_components
-    #mixture_hard=(mixture == mixture.max(axis=1)[:,None]).astype(float)
-    #mixture=mixture_hard
 
     # tweet mangling
     import copy
-    all_losses_mangled=[]
     if not args.notext:
-        for i in range(0,len(tweet['text'])):
-            input_new=copy.deepcopy(input)
-            arr1=input_new['text_'][:,:max(0,i-0),:]
-            arr2=input_new['text_'][:,min(model.tweetlen,i+1):,:]
-            input_new['text_']=np.concatenate(
-                [arr1
-                ,arr2
-                ,np.zeros([
-                    1,
-                    model.tweetlen-arr1.shape[1]-arr2.shape[1],
-                    input_new['text_'].shape[2]
-                    ])
-                ],axis=1)
-            feed_dict=model.mk_feed_dict(bs1.args,[input_new])
-            loss_mangled,losses_mangled,output_mangled=bs1.sess.run(
-                [bs1.op_loss_regularized, bs1.op_losses, bs1.op_outputs],
+        batch=[]
+        try:
+            all_losses_mangled
+        except:
+            for i in range(0,len(tweet['text'])):
+                input_new=copy.deepcopy(input)
+                arr1=input_new['text_'][:,:max(0,i-0),:]
+                arr2=input_new['text_'][:,min(model.tweetlen,i+1):,:]
+                input_new['text_']=np.concatenate(
+                    [arr1
+                    ,arr2
+                    ,np.zeros([
+                        1,
+                        model.tweetlen-arr1.shape[1]-arr2.shape[1],
+                        input_new['text_'].shape[2]
+                        ])
+                    ],axis=1)
+                batch.append(input_new)
+
+            if batch==[]:
+                tweet_empty=copy.deepcopy(input)
+                tweet_empty['text_']=np.zeros(input_new['text_'].shape)
+                batch=[tweet_empty]
+
+            feed_dict=model.mk_feed_dict(bs1.args,batch)
+            all_losses_mangled,output_mangled=bs280.sess.run(
+                [bs280.op_losses_unreduced, bs280.op_outputs],
                 feed_dict=feed_dict
                 )
-            tweetchar=tweet['text'][i]
-            if ord(tweetchar)>127:
-                tweetchar='???'
-            #print('  %3d'%i,tweet['text'][i],'loss_mangled=',loss_mangled)
-            print('  %3d'%i,tweetchar,'loss_mangled=',loss_mangled)
-            all_losses_mangled.append(losses_mangled)
-        while len(all_losses_mangled) < model.tweetlen:
-            all_losses_mangled.append(losses)
+            all_losses_mangled=[ {k:v[i] for k,v in all_losses_mangled.items() } for i in range(0,len(batch))]
+
+    # data file
+    if args.noplots:
+        try:
+            output_data_file
+        except:
+            output_data_file=gzip.open(outputdir+'/datafile.'+str(datetime.datetime.now())+'.data.gz','w')
+
+        outputdata={
+            'tweet' : tweet,
+            'input[gps_]' : input['gps_'].tolist(),
+            'output[gps]' : np.reshape(output['gps'],[2]).tolist(),
+            'loss' : float(loss),
+            'losses' : { k:float(v) for k,v in losses.items() },
+            'all_losses_mangled' : [ { k:float(v) for k,v in losses.items() } for losses in all_losses_mangled ],
+        }
+        output_data_file.write(json.dumps(outputdata)+'\n')
+        continue
 
     # tweet fig
     def mk_tweet_ax(lossname,ax,maxwidth=35):
-        #z=np.array([d[lossname]-losses[lossname] for d in all_losses_mangled])
-        z=np.array([d[lossname] for d in all_losses_mangled])
-        z=np.reshape(z,[model.tweetlen/maxwidth,maxwidth])
+        z=np.array([d[lossname]-losses[lossname] for d in all_losses_mangled])
+        #z=np.array([d[lossname] for d in all_losses_mangled])
         #zabsmax=np.amax(np.abs(z))
         zabsmax=np.amax(np.abs(z-losses[lossname]))
         cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", ["red","white","green"])
-        norm=plt.Normalize(losses[lossname]-zabsmax,losses[lossname]+zabsmax)
+        norm=plt.Normalize(-zabsmax,zabsmax)
+        #norm=plt.Normalize(losses[lossname]-zabsmax,losses[lossname]+zabsmax)
+        z=np.pad(z,[0,model.tweetlen-len(all_losses_mangled)],'constant',constant_values=0.0)
+        z=np.reshape(z,[model.tweetlen/maxwidth,maxwidth])
         plt.imshow(z,cmap=cmap,norm=norm)
         ax.get_xaxis().set_visible(False)
         ax.get_yaxis().set_visible(False)
@@ -290,9 +350,9 @@ for tweetnum in range(0,args.maxtweets):
 
     if not args.notext:
         mk_tweet_fig('optimization/op_loss_regularized')
-        mk_tweet_fig('lang_xentropy')
-        mk_tweet_fig('country_xentropy')
-        mk_tweet_fig('pos_loss_mix')
+        #mk_tweet_fig('lang_xentropy')
+        #mk_tweet_fig('country_xentropy')
+        #mk_tweet_fig('pos_loss_mix')
 
     # setup plot
     fig = plt.figure(figsize=(10,7.5))
@@ -315,6 +375,7 @@ for tweetnum in range(0,args.maxtweets):
     if not args.notext:
         #mk_tweet_ax('optimization/op_loss_regularized',ax0)
         mk_tweet_ax('country_xentropy',ax0)
+        #mk_tweet_ax('pos_loss_mix',ax0)
         #wrappedtweet='\n'.join(textwrap.wrap(tweet['text'],60))
         #plt.suptitle(wrappedtweet)
         #plt.subplots_adjust(bottom=0.1)
@@ -574,9 +635,9 @@ for tweetnum in range(0,args.maxtweets):
     extent.x1+=0.6
     extent.y0-=0.1
     plt.savefig(outputdir+'/'+basename+'-zoom.'+args.format, bbox_inches=extent)
-    plt.savefig(outputdir+'/'+basename+'-zoom.png', bbox_inches=extent)
-    plt.savefig(outputdir+'/'+basename+'-zoom.eps', bbox_inches=extent)
-    plt.savefig(outputdir+'/'+basename+'-zoom.pgf', bbox_inches=extent)
+    #plt.savefig(outputdir+'/'+basename+'-zoom.png', bbox_inches=extent)
+    #plt.savefig(outputdir+'/'+basename+'-zoom.eps', bbox_inches=extent)
+    #plt.savefig(outputdir+'/'+basename+'-zoom.pgf', bbox_inches=extent)
 
     extent = ax20.get_window_extent().transformed(fig.dpi_scale_trans.inverted())
     extent.x0-=0.1

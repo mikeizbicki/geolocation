@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+
+from __future__ import print_function
+
 import math
 import city_loc
 import myhash
@@ -39,7 +43,8 @@ def update_parser(parser):
     parser.add_argument('--full',type=int,nargs='*',default=[2048,2048])
     parser.add_argument('--full_per_lang',action='store_true')
 
-    parser.add_argument('--output',choices=['pos','country','loc'],default=['pos','country'],nargs='*')
+    parser.add_argument('--output',choices=['pos','country','loc','wnut2016','sentiment'],default=['pos','country'],nargs='*')
+    parser.add_argument('--wnut2016_biasonly',action='store_true')
     parser.add_argument('--loss_weights',choices=['auto','ave','manual','manual2','manual3','prod'],default='ave')
     parser.add_argument('--loss_staircase',action='store_true')
     parser.add_argument('--pos_type',choices=['naive','aglm','aglm_mix'],default='aglm')
@@ -75,9 +80,10 @@ def update_parser(parser):
 
 ################################################################################
 
-def inference(args,input_tensors,reuse_variables=False):
+def inference(args,input_tensors,reuse_variables=False,disable_summaries=False):
     import tensorflow as tf
     op_losses={}
+    op_losses_unreduced={}
     op_metrics={}
     op_outputs={}
     epsilon = 1e-6
@@ -134,6 +140,8 @@ def inference(args,input_tensors,reuse_variables=False):
             make_summaries_without_newuser(mk_summary2)
 
     def make_summaries_without_newuser(mk_summary):
+        if disable_summaries:
+            return
         with tf.variable_scope('mk_summaries'):
             if args.summary_size=='small':
                 summary_langs=[]
@@ -170,7 +178,7 @@ def inference(args,input_tensors,reuse_variables=False):
 
     # summarize newusers
     with tf.variable_scope('newusers'):
-        newuser_vec = tf.reshape(input_tensors['newuser_'],[args.batchsize])
+        newuser_vec = tf.reshape(input_tensors['newuser_'],[-1])
         def mk_newuser_summary(basename,weights):
             tf.summary.scalar(basename+'newuser', tf.reduce_mean(weights*input_tensors['newuser_']))
         make_summaries_without_newuser(mk_newuser_summary)
@@ -178,15 +186,17 @@ def inference(args,input_tensors,reuse_variables=False):
     # helper for making xentropy layers with appropriate summaries
     def mk_xentropy_layer(valname,val_,logits):
 
-        xentropy = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(
-                labels=tf.to_int64(tf.reshape(val_,[args.batchsize])),
+        xentropy_unreduced = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                labels=tf.to_int64(tf.reshape(val_,[-1])),
                 logits=logits+epsilon,
                 name='xentropy'
-                ))
+                )
+        xentropy=tf.reduce_mean(xentropy_unreduced)
         op_losses[valname+'_xentropy']=xentropy
+        op_losses_unreduced[valname+'_xentropy']=xentropy_unreduced
         op_metrics['optimization/'+valname+'_xentropy']=(args.batchsize,xentropy)
 
-        val=tf.reshape(tf.argmax(logits,axis=1),shape=[args.batchsize,1])
+        val=tf.reshape(tf.argmax(logits,axis=1),shape=[-1,1])
 
         def mk_metric(groupname,weights):
             xentropy_sum = tf.reduce_sum(
@@ -245,7 +255,7 @@ def inference(args,input_tensors,reuse_variables=False):
 
         # cnn inputs
         if 'cnn' in args.input:
-            text_reshaped = tf.reshape(input_tensors['text_'],[args.batchsize,tweetlen,args.cnn_vocabsize,1])
+            text_reshaped = tf.reshape(input_tensors['text_'],[-1,tweetlen,args.cnn_vocabsize,1])
 
             # Very Deep Convolutional Neural Network
             # follows paper "very deep convolutional networks for text classification"
@@ -427,7 +437,7 @@ def inference(args,input_tensors,reuse_variables=False):
 
                     last=pooled
                     input_size=int(last.get_shape()[1]*last.get_shape()[2]*last.get_shape()[3])
-                    cnn_layer=tf.reshape(last,[args.batchsize,input_size])
+                    cnn_layer=tf.reshape(last,[-1,input_size])
                     inputs.append(cnn_layer)
 
         # language inputs
@@ -449,7 +459,7 @@ def inference(args,input_tensors,reuse_variables=False):
                 if args.predict_lang_use:
                     lang_one_hot=lang_softmax
                 else:
-                    lang_one_hot = tf.reshape(tf.one_hot(input_tensors['lang_'],len(myhash.langs),axis=1),shape=[args.batchsize,len(myhash.langs)])
+                    lang_one_hot = tf.reshape(tf.one_hot(input_tensors['lang_'],len(myhash.langs),axis=1),shape=[-1,len(myhash.langs)])
 
                 inputs.append(lang_one_hot)
 
@@ -530,11 +540,43 @@ def inference(args,input_tensors,reuse_variables=False):
 
                 mk_xentropy_layer('country',input_tensors['country_'],logits)
 
+        # wnut2016 tweet location labels
+        if 'wnut2016' in args.output:
+            wnut2016_ = input_tensors['wnut2016_']
+            num_wnut2016=3363
+
+            with tf.variable_scope('wnut2016'):
+                w = mk_variable(tf.zeros([final_layer_size,num_wnut2016]),name='w')
+                b = mk_variable(tf.zeros([num_wnut2016]),name='b')
+                dynamic_batchsize=tf.shape(final_layer)[0]
+                if args.wnut2016_biasonly:
+                    b_reshape=tf.reshape(b,[1,num_wnut2016])
+                    logits=tf.tile(b_reshape,[tf.shape(final_layer)[0],1])
+                else:
+                    logits = tf.matmul(final_layer,w)+b
+
+                #logits=tf.Print(logits,[final_layer,logits,w])
+                wnut2016_softmax=tf.nn.softmax(logits)
+                op_outputs['wnut2016_softmax']=wnut2016_softmax
+                mk_xentropy_layer('wnut2016',input_tensors['wnut2016_'],logits)
+
+        # sentiment tweet location labels
+        if 'sentiment' in args.output:
+            sentiment_ = input_tensors['sentiment_']
+            num_sentiment=3
+
+            with tf.variable_scope('sentiment'):
+                w = mk_variable(tf.zeros([final_layer_size,num_sentiment]),name='w')
+                b = mk_variable(tf.zeros([num_sentiment]),name='b')
+                dynamic_batchsize=tf.shape(final_layer)[0]
+                logits = tf.matmul(final_layer,w)+b
+                sentiment_softmax=tf.nn.softmax(logits)
+                op_outputs['sentiment_softmax']=sentiment_softmax
+                mk_xentropy_layer('sentiment',input_tensors['sentiment_'],logits)
 
         # loc buckets
         myhash.init_loc_hash(args)
         if 'loc' in args.output:
-            #loc_ = tf.placeholder(tf.int64, [args.batchsize,1],name='loc_')
             loc_ = input_tensors['loc_']
 
             with tf.variable_scope('loc'):
@@ -574,6 +616,20 @@ def inference(args,input_tensors,reuse_variables=False):
 
         # position based losses
         if 'pos' in args.output:
+          print('XXXXXXXXXXXXXXXXXXxx')
+          print('XXXXXXXXXXXXXXXXXXxx')
+          print('XXXXXXXXXXXXXXXXXXxx')
+          print('XXXXXXXXXXXXXXXXXXxx')
+          print('XXXXXXXXXXXXXXXXXXxx')
+          print('XXXXXXXXXXXXXXXXXXxx')
+          print('XXXXXXXXXXXXXXXXXXxx')
+          print('XXXXXXXXXXXXXXXXXXxx')
+          print('XXXXXXXXXXXXXXXXXXxx')
+          print('XXXXXXXXXXXXXXXXXXxx')
+          print('XXXXXXXXXXXXXXXXXXxx')
+          print('XXXXXXXXXXXXXXXXXXxx')
+          print('XXXXXXXXXXXXXXXXXXxx')
+          print('XXXXXXXXXXXXXXXXXXxx')
           with tf.device('CPU:0'):
             gps_=input_tensors['gps_']
 
@@ -655,7 +711,6 @@ def inference(args,input_tensors,reuse_variables=False):
 
                     if args.gmm_type=='simple' or args.gmm_type=='verysimple':
                         trainable=args.gmm_type!='verysimple'
-                        print('trainable=',trainable)
                         pre_mu_var = pre_mu_gps_rad0
                         # FIXME: trainable not working
                         #pre_mu_var = mk_variable(pre_mu_gps_rad0,name='pre_mu',trainable=trainable)
@@ -698,7 +753,7 @@ def inference(args,input_tensors,reuse_variables=False):
                                  , tf.cos(op_lat_rad_) * tf.sin(op_lon_rad_*2)
                                  , tf.cos(op_lat_rad_) * tf.cos(op_lon_rad_*2)
                                  ])
-                    x_reshape = tf.reshape(x,[3,args.batchsize,1])
+                    x_reshape = tf.reshape(x,[3,-1,1])
 
                     if args.gmm_decomposed==[]:
                         w = mk_variable(var_init([pos_final_layer_size,args.gmm_components],0.01),name='w')
@@ -794,6 +849,7 @@ def inference(args,input_tensors,reuse_variables=False):
                     log_loss = - tf.log(likelihood_mixed + epsilon)
                     loss=tf.reduce_mean(log_loss,name='dbgloss')
                     op_losses['pos_loss_mix']=loss
+                    op_losses_unreduced['pos_loss_mix']=log_loss
                     op_metrics['optimization/aglm_mix']=(args.batchsize,loss)
 
                     with tf.variable_scope('summaries'):
@@ -828,11 +884,10 @@ def inference(args,input_tensors,reuse_variables=False):
                     main_component=mixture
                     main_component=tf.where(
                             tf.equal(tf.reduce_max(mixture, axis=1, keep_dims=True), mixture),
-                            tf.constant(1.0, shape=mixture.shape),
-                            tf.constant(0.0, shape=mixture.shape)
+                            mixture*0+1.0, #tf.constant(1.0, shape=mixture.shape),
+                            mixture*0+0.0, #tf.constant(0.0, shape=mixture.shape)
                             )
-                    #main_component_reshape=tf.reshape(main_component,[args.batchsize,1,args.gmm_components])
-                    main_component_reshape=tf.reshape(main_component,[args.batchsize,1,sparsity])
+                    main_component_reshape=tf.reshape(main_component,[-1,1,sparsity])
 
                     gps = tf.reduce_sum(main_component_reshape*pre_mu_gps,axis=2)
                     op_lat = gps[:,0]
@@ -864,7 +919,8 @@ def inference(args,input_tensors,reuse_variables=False):
 
                 # radius of earth = 3959 miles, 6371 kilometers
                 op_dist = 2*6371*tf.asin(tf.sqrt(tf.maximum(0.0,squared_angular_dist)))
-                op_dist_ave = tf.reduce_sum(op_dist)/args.batchsize
+                op_dist_ave = tf.reduce_mean(op_dist)
+                #op_losses_unreduced['op_dist']=op_dist
 
                 op_delta_x = tf.cos(op_lat_rad)*tf.cos(op_lon_rad)-tf.cos(op_lat_rad_)*tf.cos(op_lon_rad_)
                 op_delta_y = tf.cos(op_lat_rad)*tf.sin(op_lon_rad)-tf.cos(op_lat_rad_)*tf.sin(op_lon_rad_)
@@ -878,6 +934,7 @@ def inference(args,input_tensors,reuse_variables=False):
                     op_loss = tf.reduce_sum(op_chord)/args.batchsize
                 if args.pos_loss=='dist':
                     op_loss = op_dist_ave
+                    op_loss_unreduced=op_dist
                 if args.pos_loss=='dist2':
                     op_loss = tf.reduce_sum(op_dist*op_dist)/args.batchsize
                 if args.pos_loss=='dist_sqrt':
@@ -936,6 +993,7 @@ def inference(args,input_tensors,reuse_variables=False):
 
         if args.loss_weights == 'ave':
             op_loss = tf.reduce_mean(op_losses.values())
+            op_loss_unreduced = tf.reduce_mean(op_losses_unreduced.values(),axis=0)
 
         if args.loss_weights == 'manual':
             op_loss = 0
@@ -982,9 +1040,11 @@ def inference(args,input_tensors,reuse_variables=False):
                 regularizers.append(args.l2*tf.nn.l2_loss(var))
 
         op_loss_regularized=op_loss+tf.reduce_sum(regularizers)
+        op_loss_unreduced_regularized=op_loss_unreduced+tf.reduce_sum(regularizers)
         op_losses['optimization/op_loss_regularized']=op_loss_regularized
+        op_losses_unreduced['optimization/op_loss_regularized']=op_loss_unreduced_regularized
 
-        return op_metrics,op_loss_regularized,op_losses,op_outputs
+        return op_metrics,op_loss_regularized,op_losses,op_losses_unreduced,op_outputs
 
 ########################################
 
@@ -1029,7 +1089,7 @@ def json2dict(args,str):
     import unicodedata
     import numpy as np
     data=json.loads(str)
-    data['text']=preprocess_text(args,data['text'])
+    data['text']="I'm at "+preprocess_text(args,data['text'])
 
     batch_dict={}
 
@@ -1096,11 +1156,17 @@ def json2dict(args,str):
         batch_dict['text_']=encodedtext
 
     if 'time' in args.input:
-        timestamp = np.array(float(data['timestamp_ms']))
+        try:
+            timestamp_ms=float(data['timestamp_ms'])
+        except:
+            timestamp_ms=0.0
+        timestamp = np.array(timestamp_ms)
         batch_dict['timestamp_ms_']=timestamp
 
     # get true output
-    if 'pos' in args.output:
+    # FIXME: for some reason, the gps info must be filled out or tf complains
+    # even when 'pos' is not in args.output
+    if True: #'pos' in args.output:
         if data['geo']:
             lat=data['geo']['coordinates'][0]
             lon=data['geo']['coordinates'][1]
@@ -1115,7 +1181,17 @@ def json2dict(args,str):
                 coord=(lat,lon)
                 return coord
 
-            coord=centroid(data['place']['bounding_box']['coordinates'])
+            try:
+                coord=centroid(data['place']['bounding_box']['coordinates'])
+            except:
+                try:
+                    global printed_warning
+                    printed_warning
+                except:
+                    global printed_warning
+                    print('WARNING: no coordinate in tweet, using GPS=(0.0,0.0)')
+                    printed_warning=True
+                coord=[0.0,0.0]
             # the twitter format stores bounding boxes as (lon,lat) pairs
             # instead of (lat,lon) pairs, so we need to flip them around
             coord=(coord[1],coord[0])
@@ -1127,6 +1203,16 @@ def json2dict(args,str):
         except:
             loc_code=0
         batch_dict['loc_']=np.array([loc_code])
+
+    if 'wnut2016' in args.output:
+        #num_wnut2016=3363
+        wnut2016_class=data['wnut2016']['tweet_city']
+        batch_dict['wnut2016_']=wnut2016_class
+
+    if 'sentiment' in args.output:
+        #num_sentiment=3363
+        sentiment_class=data['sentiment']['tweet_city']
+        batch_dict['sentiment_']=sentiment_class
 
     return batch_dict
 
@@ -1145,7 +1231,10 @@ def mk_feed_dict(args,batch,suffix=':0'):
             batch_dict[k].append(data[k])
 
     feed_dict['lang_'+suffix] = np.vstack(batch_dict['lang_'])
-    feed_dict['newuser_'+suffix] = np.vstack(batch_dict['newuser_'])
+    try:
+        feed_dict['newuser_'+suffix] = np.vstack(batch_dict['newuser_'])
+    except:
+        feed_dict['newuser_'+suffix] = np.zeros([len(batch_dict['lang_']),1])
 
     if 'bow' in args.input:
         def mkSparseTensorValue(m):
@@ -1175,10 +1264,20 @@ def mk_feed_dict(args,batch,suffix=':0'):
     #if 'country' in args.output:
     feed_dict['country_'+suffix] = np.vstack(batch_dict['country_'])
 
-    if 'pos' in args.output:
+    if True: #'pos' in args.output:
         feed_dict['gps_'+suffix] = np.vstack(batch_dict['gps_'])
 
     if 'loc' in args.output:
         feed_dict['loc_'+suffix] = np.vstack(batch_dict['loc_'])
+
+    if 'wnut2016' in args.output:
+        feed_dict['wnut2016_'+suffix] = np.vstack(batch_dict['wnut2016_'])
+    #else:
+        #feed_dict['wnut2016_'+suffix] = np.zeros([len(batch_dict['lang_']),1])
+
+    if 'sentiment' in args.output:
+        feed_dict['sentiment_'+suffix] = np.vstack(batch_dict['sentiment_'])
+    #else:
+        #feed_dict['sentiment_'+suffix] = np.zeros([len(batch_dict['lang_']),1])
 
     return feed_dict

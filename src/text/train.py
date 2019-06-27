@@ -19,6 +19,8 @@ parser.add_argument('--log_name',type=str,default=None)
 parser.add_argument('--stepsave',type=int,default=10000)
 parser.add_argument('--seed',type=int,default=0)
 parser.add_argument('--no_staging_area',action='store_true')
+parser.add_argument('--loss_output',action='store_true')
+parser.add_argument('--no_optimizer',action='store_true')
 
 # debug variables
 parser.add_argument('--no_checkpoint',action='store_true')
@@ -34,7 +36,7 @@ parser.add_argument('--max_open_files',type=int,default=96)
 parser.add_argument('--multiepoch',action='store_true')
 
 parser.add_argument('--initial_weights',type=str,default=None)
-parser.add_argument('--train_list',type=str,nargs='*',default=None)
+parser.add_argument('--train_list',type=str,nargs='*',default=[])
 
 import model
 model.update_parser(parser)
@@ -95,6 +97,7 @@ print('cuda_devices=',cuda_devices)
 # inputs
 placeholders={
     'country_' : tf.placeholder(tf.int64, [args.batchsize,1],name='country_'),
+    'wnut2016_' : tf.placeholder(tf.int64, [args.batchsize,1],name='wnut2016_'),
     'text_' : tf.placeholder(tf.float32, [args.batchsize,model.tweetlen,args.cnn_vocabsize],name='text_'),
     'gps_' : tf.placeholder(tf.float32, [args.batchsize,2], name='gps_'),
     #'loc_' : tf.placeholder(tf.int64, [args.batchsize,1],name='loc_'),
@@ -135,6 +138,7 @@ for device in cuda_devices:
         with tf.variable_scope('input'+device):
             device_inputs[device]={
                 'country_' : tf.placeholder(tf.int64, [args.batchsize,1],name='country_'),
+                'wnut2016_' : tf.placeholder(tf.int64, [args.batchsize,1],name='wnut2016_'),
                 'gps_' : tf.placeholder(tf.float32, [args.batchsize,2], name='gps_'),
                 #'loc_' : tf.placeholder(tf.int64, [args.batchsize,1],name='loc_'),
                 'newuser_' : tf.placeholder(tf.float32, [args.batchsize,1],name='newuser_'),
@@ -167,10 +171,10 @@ for device in cuda_devices:
         else:
             device_input=device_inputs[device]
 
-        device_metrics[device],device_loss_reg[device],op_losses,op_outputs = model.inference(
+        device_metrics[device],device_loss_reg[device],op_losses,op_losses_unreduced,op_outputs = model.inference(
             args,
             device_input,
-            reuse_variables
+            reuse_variables,
             )
 
         reuse_variables=True
@@ -191,8 +195,9 @@ for device in cuda_devices:
             elif args.optimizer=='sgd':
                 optimizer = tf.train.MomentumOptimizer(learningrate,args.momentum)
 
-            if args.train_list is None:
+            if args.train_list == []:
                 trainable_vars=tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+                print('training all variables')
             else:
                 trainable_vars=[]
                 print('trainable variables:')
@@ -209,7 +214,8 @@ for device in cuda_devices:
                 ))
             device_grads_summary[device]=sum(map(lambda x: tf.reduce_sum(x),gradients))
             #gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
-            device_grads[device]=(optimizer.compute_gradients(device_loss_reg[device]))
+            #device_grads[device]=(optimizer.compute_gradients(device_loss_reg[device]))
+            device_grads[device]=zip(gradients,variables)
 
 # combine gradients from each device
 # see: https://github.com/petewarden/tensorflow_makefile/blob/master/tensorflow/models/image/cifar10/cifar10_multi_gpu_train.py
@@ -255,6 +261,8 @@ with tf.device('/cpu:0'):
             averaged_grads,
             global_step=global_step
             )
+        if args.no_optimizer:
+            train_op=()
 
 # combine summaries
 with tf.variable_scope('summaries'):
@@ -336,6 +344,10 @@ import simplejson as json
 args_str=json.dumps(vars(args))
 with open(log_dir+'/args.json','w') as f:
     f.write(args_str)
+
+# create loss output
+if args.loss_output:
+    loss_output=open(log_dir+'/loss_output.txt','w')
 
 # create tf session
 config = tf.ConfigProto(allow_soft_placement = True)
@@ -520,7 +532,10 @@ def mk_batches(device_files,deviceid):
                 try:
                     open_files.append(gzip.open(filename,'rt'))
                 except Exception as e:
-                    print('gzip.open failed on ',filename,file=sys.stderr)
+                    #try:
+                        #open_files.append(open(filename,'rt'))
+                    #except Exception as e:
+                    print('open failed on ',filename,file=sys.stderr)
                     print(e,file=sys.stderr)
                     continue
                 print('  opening [%s]; files remaining: %d/%d; buffer state: %d/%d'%(
@@ -554,24 +569,25 @@ def mk_batches(device_files,deviceid):
             #if batch==[]:
                 #print('nextline=',nextline)
 
-            try:
-            #if True:
+            #try:
+            if True:
                 data=model.json2dict(args,nextline)
                 batch.append(data)
-            except Exception as e:
+            #except Exception as e:
                 #pass
                 #print('current file=',open_files[index].name)
-                if str(e)!="'text'":
-                    print('  exception:',e)
+                #if str(e)!="'text'":
+                    #print('  exception:',e)
 
         feed_dict=model.mk_feed_dict(args,batch)
         #print('mp_queue.qsize()=',mp_queue.qsize())
         mp_queue.put(feed_dict)
 
-for i in range(0,len(cuda_devices)):
+cpu_per_gpu=1
+for i in range(0,cpu_per_gpu*len(cuda_devices)):
     device_files=files_remaining[
-        (i+0)*len(files_remaining)/len(cuda_devices):
-        (i+1)*len(files_remaining)/len(cuda_devices)
+        (cpu_per_gpu*i+0)*len(files_remaining)/len(cuda_devices):
+        (cpu_per_gpu*i+1)*len(files_remaining)/len(cuda_devices)
         ]
     process=mp.Process(target=mk_batches,args=[device_files,i])
     process.start()
@@ -622,17 +638,39 @@ while True:
     run_time_start=time.time()
     if record_summary:
         #print('feed_dict.keys()=',feed_dict.keys())
-        _a,_b,_c,summary_str = sess.run(
-            [ train_op , op_summaries, device_input_queue_enqueue, summary ]
+        _a,_b,_c,summary_str,_metrics = sess.run(
+            [ train_op , op_summaries, device_input_queue_enqueue, summary, metrics ]
+        #print('device_inputs=',device_inputs[device_inputs.keys()[0]].keys())
+        #print('feed_dict=',feed_dict.keys())
+        #_a,_b,_c,_metrics,[_run_country,_run_country_out]=sess.run(
+            #[ train_op , op_summaries, device_input_queue_enqueue, summary, metrics, [device_inputs[device_inputs.keys()[0]]['country_'],feed_dict['input1/country_:0']] ]
             , feed_dict=feed_dict
             )
         summary_writer.add_summary(summary_str, stats_step['count']*args.batchsize*num_devices)
         summary_writer.flush()
+
     else:
-        sess.run(
-            [ train_op , op_summaries, device_input_queue_enqueue ]
+        _a,_b,_c,_metrics=sess.run(
+            [ train_op , op_summaries, device_input_queue_enqueue, metrics ]
             , feed_dict=feed_dict
             )
+
+    #print('countries=',_run_country,_run_country_out)
+
+    if args.loss_output:
+        #loss_output.write('%0.4f %0.4f %0.4f\n'%(
+        #print('_metrics=',_metrics.keys())
+        loss_output.write('%0.4f %0.4f %0.4f %0.4f\n'%(
+            _metrics['all/dist'],
+            _metrics['all/country_acc'][0],
+            _metrics['all/country_acc'][1],
+            _metrics['all/k100'][0],
+            #_metrics['all/k100'][1],
+            ))
+        loss_output.flush()
+        sess.run(reset_local_vars)
+        #asd
+
     run_time_stop=time.time()
     stats_step['run_time']+=run_time_stop-run_time_start
 
